@@ -1,0 +1,17 @@
+
+## python 
+*.pyc
+
+experiments/*
+protobufs/*
+tensorboard/*
+
+## Pycharm project folders
+.idea*
+
+train_config.py
+eval_config.py
+
+chain_config_files.txt
+config/train_config_chain_*
+
