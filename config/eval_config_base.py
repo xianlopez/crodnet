@@ -1,5 +1,5 @@
 from mean_ap import MeanAPOpts
-from crodnet import crodnet_options
+from CrodnetOptions import CrodnetOptions
 from DataAugmentation import DataAugOpts
 
 
@@ -39,7 +39,7 @@ class EvaluateConfiguration:
 
     mean_ap_opts = MeanAPOpts()
 
-    crodnet_opts = crodnet_options()
+    crodnet_opts = CrodnetOptions()
 
 
     ##################################

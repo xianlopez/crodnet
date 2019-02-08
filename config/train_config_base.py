@@ -1,6 +1,6 @@
 from mean_ap import MeanAPOpts
 from DataAugmentation import DataAugOpts
-from crodnet import crodnet_options
+from CrodnetOptions import CrodnetOptions
 from LRScheduler import LRPolicies, LRSchedulerOpts
 
 
@@ -60,7 +60,7 @@ class TrainConfiguration:
     ##################################
 
 
-    crodnet_opts = crodnet_options()
+    crodnet_opts = CrodnetOptions()
 
 
     ##################################

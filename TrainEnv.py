@@ -13,15 +13,9 @@ import socket
 import os
 from L2Regularization import L2RegularizationLoss
 import math
-import crodnet
+import MultiCellArch
 import re
 from LRScheduler import LRScheduler
-import sys
-
-
-# ======================================================================================================================
-# See: https://thecodacus.com/tensorboard-tutorial-visualize-networks-graphically/#.WmtAFd_iaHs
-# For Tensorboard exmple.
 
 
 class Checkpoint:
@@ -378,7 +372,7 @@ class TrainEnv:
     # ------------------------------------------------------------------------------------------------------------------
     def generate_graph(self, args):
         self.is_training = tf.placeholder(dtype=tf.bool, shape=(), name='is_training')
-        self.network = crodnet.crodnet(args.crodnet_opts, DataReader.get_n_classes(args), self.is_training, args.outdir)
+        self.network = MultiCellArch.MultiCellArch(args.crodnet_opts, DataReader.get_n_classes(args), self.is_training, args.outdir)
         self.define_inputs_and_labels(args)
         self.predictions, self.loss = self.network.make(self.inputs, self.labels, self.filenames)
         self.model_variables = [n.name for n in tf.global_variables()]
