@@ -94,24 +94,6 @@ class DetectionDataAugmentation:
             image.set_shape((None, None, 3))
         return image, bboxes, filename
 
-    def ssd_photometrics_sequence1(self, image):
-        image = random_adjust_brightness(image, self.data_aug_opts.brightness_delta_lower, self.data_aug_opts.brightness_delta_upper, self.data_aug_opts.brightness_prob)
-        image = random_adjust_contrast(image, self.data_aug_opts.contrast_factor_lower, self.data_aug_opts.contrast_factor_upper, self.data_aug_opts.contrast_prob)
-        image = random_adjust_saturation(image, self.data_aug_opts.saturation_factor_lower, self.data_aug_opts.saturation_factor_upper, self.data_aug_opts.saturation_prob)
-        image = random_adjust_hue(image, self.data_aug_opts.hue_delta_lower, self.data_aug_opts.hue_delta_upper, self.data_aug_opts.hue_prob)
-        return image
-
-    def ssd_photometrics_sequence2(self, image):
-        image = random_adjust_brightness(image, self.data_aug_opts.brightness_delta_lower, self.data_aug_opts.brightness_delta_upper, self.data_aug_opts.brightness_prob)
-        image = random_adjust_saturation(image, self.data_aug_opts.saturation_factor_lower, self.data_aug_opts.saturation_factor_upper, self.data_aug_opts.saturation_prob)
-        image = random_adjust_hue(image, self.data_aug_opts.hue_delta_lower, self.data_aug_opts.hue_delta_upper, self.data_aug_opts.hue_prob)
-        image = random_adjust_contrast(image, self.data_aug_opts.contrast_factor_lower, self.data_aug_opts.contrast_factor_upper, self.data_aug_opts.contrast_prob)
-        return image
-
-    def ssd_photometric_distortions(self, image):
-        image = tf.cond(tf.greater(tf.random_uniform(shape=()), 0.5), lambda: self.ssd_photometrics_sequence1(image), lambda: self.ssd_photometrics_sequence2(image))
-        return image
-
     def flip_boxes_vertically(self, bboxes):
         # bboxes: (nboxes, 5)
         new_y_min = 1.0 - bboxes[:, 2] - bboxes[:, 4]  # (nboxes)
