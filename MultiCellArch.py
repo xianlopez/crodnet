@@ -919,7 +919,7 @@ class MultiCellArch:
         if self.opts.encoding_method == 'basic_1':
             dcx_enc = np.tan(dcx * (np.pi / 2.0 - self.opts.enc_epsilon))
             dcy_enc = np.tan(dcy * (np.pi / 2.0 - self.opts.enc_epsilon))
-            w_enc = CommonEncoding.((w_rel - self.opts.enc_wh_b) / self.opts.enc_wh_a)
+            w_enc = CommonEncoding.logit((w_rel - self.opts.enc_wh_b) / self.opts.enc_wh_a)
             h_enc = CommonEncoding.logit((h_rel - self.opts.enc_wh_b) / self.opts.enc_wh_a)
         elif self.opts.encoding_method == 'ssd':
             dcx_enc = dcx * 10.0
