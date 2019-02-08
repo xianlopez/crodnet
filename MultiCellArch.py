@@ -65,6 +65,11 @@ class MultiCellArch:
             self.anchors_coordinates[pos, 1] = ymin
             self.anchors_coordinates[pos, 2] = xmax
             self.anchors_coordinates[pos, 3] = ymax
+        # Transform to [x_center, y_center, width, height] coordinates:
+        self.anchors_xc = (self.anchors_coordinates[:, 0] + self.anchors_coordinates[:, 2]) / 2.0
+        self.anchors_yc = (self.anchors_coordinates[:, 1] + self.anchors_coordinates[:, 3]) / 2.0
+        self.anchors_w = self.anchors_coordinates[:, 2] - self.anchors_coordinates[:, 0]
+        self.anchors_h = self.anchors_coordinates[:, 3] - self.anchors_coordinates[:, 1]
 
     def make_input_multiscale(self, inputs):
         inputs_all_sizes = []
@@ -901,18 +906,12 @@ class MultiCellArch:
         xc = xmin + 0.5 * width
         yc = ymin + 0.5 * height
 
-        # self.anchors_coordinates (nboxes, 4) [xmin, ymin, xmax, ymax]
-        anchors_xc = (self.anchors_coordinates[:, 0] + self.anchors_coordinates[:, 2]) / 2.0
-        anchors_yc = (self.anchors_coordinates[:, 1] + self.anchors_coordinates[:, 3]) / 2.0
-        anchors_w = self.anchors_coordinates[:, 2] - self.anchors_coordinates[:, 0]
-        anchors_h = self.anchors_coordinates[:, 3] - self.anchors_coordinates[:, 1]
-
-        dcx = (anchors_xc - xc) / (anchors_w * 0.5)  # (nboxes)
-        dcy = (anchors_yc - yc) / (anchors_h * 0.5)  # (nboxes)
+        dcx = (self.anchors_xc - xc) / (self.anchors_w * 0.5)  # (nboxes)
+        dcy = (self.anchors_yc - yc) / (self.anchors_h * 0.5)  # (nboxes)
         # Between -1 and 1 for the box to lie inside the anchor.
 
-        w_rel = width / anchors_w  # (nboxes)
-        h_rel = height / anchors_h  # (nboxes)
+        w_rel = width / self.anchors_w  # (nboxes)
+        h_rel = height / self.anchors_h  # (nboxes)
         # Between 0 and 1 for the box to lie inside the anchor.
 
         # Encoding step:
@@ -964,17 +963,11 @@ class MultiCellArch:
         else:
             raise Exception('Encoding method not recognized.')
 
-        # self.anchors_coordinates (nboxes, 4) [xmin, ymin, xmax, ymax]
-        anchors_xc = (self.anchors_coordinates[..., 0] + self.anchors_coordinates[..., 2]) / 2.0
-        anchors_yc = (self.anchors_coordinates[..., 1] + self.anchors_coordinates[..., 3]) / 2.0
-        anchors_w = self.anchors_coordinates[..., 2] - self.anchors_coordinates[..., 0]
-        anchors_h = self.anchors_coordinates[..., 3] - self.anchors_coordinates[..., 1]
+        xc = self.anchors_xc - dcx_rel * (self.anchors_w * 0.5)  # (nboxes)
+        yc = self.anchors_yc - dcy_rel * (self.anchors_h * 0.5)  # (nboxes)
 
-        xc = anchors_xc - dcx_rel * (anchors_w * 0.5)  # (nboxes)
-        yc = anchors_yc - dcy_rel * (anchors_h * 0.5)  # (nboxes)
-
-        width = anchors_w * w_rel  # (nboxes)
-        height = anchors_h * h_rel  # (nboxes)
+        width = self.anchors_w * w_rel  # (nboxes)
+        height = self.anchors_h * h_rel  # (nboxes)
 
         xmin = xc - 0.5 * width  # (nboxes)
         ymin = yc - 0.5 * height  # (nboxes)
@@ -1019,16 +1012,16 @@ class MultiCellArch:
         anchors_coords_exp = np.expand_dims(self.anchors_coordinates, axis=0)  # (1, nboxes, 4)
         batch_size = coords_enc.shape[0]
         anchors_coords_exp = np.tile(anchors_coords_exp, [batch_size, 1, 1])  # (batch_size, nboxes, 4)
-        anchors_xc = (anchors_coords_exp[:, :, 0] + anchors_coords_exp[:, :, 2]) / 2.0  # (batch_size, nboxes)
-        anchors_yc = (anchors_coords_exp[:, :, 1] + anchors_coords_exp[:, :, 3]) / 2.0  # (batch_size, nboxes)
-        anchors_w = anchors_coords_exp[:, :, 2] - anchors_coords_exp[:, :, 0]  # (batch_size, nboxes)
-        anchors_h = anchors_coords_exp[:, :, 3] - anchors_coords_exp[:, :, 1]  # (batch_size, nboxes)
+        anchors_xc_exp = (anchors_coords_exp[:, :, 0] + anchors_coords_exp[:, :, 2]) / 2.0  # (batch_size, nboxes)
+        anchors_yc_exp = (anchors_coords_exp[:, :, 1] + anchors_coords_exp[:, :, 3]) / 2.0  # (batch_size, nboxes)
+        anchors_w_exp = anchors_coords_exp[:, :, 2] - anchors_coords_exp[:, :, 0]  # (batch_size, nboxes)
+        anchors_h_exp = anchors_coords_exp[:, :, 3] - anchors_coords_exp[:, :, 1]  # (batch_size, nboxes)
 
-        xc = anchors_xc - dcx_rel * (anchors_w * 0.5)  # (batch_size, nboxes)
-        yc = anchors_yc - dcy_rel * (anchors_h * 0.5)  # (batch_size, nboxes)
+        xc = anchors_xc_exp - dcx_rel * (anchors_w_exp * 0.5)  # (batch_size, nboxes)
+        yc = anchors_yc_exp - dcy_rel * (anchors_h_exp * 0.5)  # (batch_size, nboxes)
 
-        width = anchors_w * w_rel  # (batch_size, nboxes)
-        height = anchors_h * h_rel  # (batch_size, nboxes)
+        width = anchors_w_exp * w_rel  # (batch_size, nboxes)
+        height = anchors_h_exp * h_rel  # (batch_size, nboxes)
 
         xmin = xc - 0.5 * width  # (batch_size, nboxes)
         ymin = yc - 0.5 * height  # (batch_size, nboxes)
