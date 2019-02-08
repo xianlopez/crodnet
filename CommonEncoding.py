@@ -51,7 +51,6 @@ def put_together_net_output(net_output_conf, net_output_coords, net_output_pc, o
     # net_output_pc: (..., ?)
     conf_shape = tf.shape(net_output_conf)
     left_dimensions = conf_shape[:-1]
-    batch_size = tf.shape(net_output_conf)[0]
     if opts.predict_coordinates:
         if opts.box_per_class:
             if opts.predict_pc:
@@ -203,3 +202,33 @@ def smooth_L1_loss(y_true, y_pred, reduce_last_dim=True):
         return tf.reduce_sum(l1_loss, axis=-1)
     else:
         return l1_loss
+
+
+def get_mask_match(labels_enc):
+    # labels_enc_reord: (..., 9)
+    return labels_enc[..., 4]
+
+
+def get_mask_neutral(labels_enc):
+    # labels_enc_reord: (..., 9)
+    return labels_enc[..., 5]
+
+
+def get_gt_class(labels_enc):
+    # labels_enc_reord: (..., 9)
+    return labels_enc[..., 6]
+
+
+def get_nearest_valid_gt_idx(labels_enc):
+    # labels_enc_reord: (..., 9)
+    return labels_enc[..., 7]
+
+
+def get_pc_associated(labels_enc):
+    # labels_enc_reord: (..., 9)
+    return labels_enc[..., 8]
+
+
+def get_gt_coords(labels_enc):
+    # labels_enc_reord: (..., 9)
+    return labels_enc[..., :4]

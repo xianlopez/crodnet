@@ -26,7 +26,6 @@ class MultiCellArch:
         self.grid_levels.sort(key=operator.attrgetter('input_size'))
         self.is_training = is_training
         self.n_boxes = -1
-        self.receptive_field_size = 352
         self.max_pad_rel = -1
         self.max_pad_abs = -1
         self.input_image_size_w_pad = -1
@@ -49,7 +48,7 @@ class MultiCellArch:
     def get_expected_num_boxes(self):
         expected_n_boxes = 0
         for grid in self.grid_levels:
-            dim_this_grid = 1 + (grid.input_size_w_pad - self.receptive_field_size) // self.opts.step_in_pixels
+            dim_this_grid = 1 + (grid.input_size_w_pad - network.receptive_field_size) // self.opts.step_in_pixels
             expected_n_boxes += dim_this_grid * dim_this_grid
         return expected_n_boxes
 
@@ -320,7 +319,7 @@ class MultiCellArch:
         box_height_wrt_anchor = box_height_wrt_pad / anchor_height_wrt_pad
         box_coords_wrt_anchor = np.array([box_xmin_wrt_anchor, box_ymin_wrt_anchor, box_width_wrt_anchor, box_height_wrt_anchor], dtype=np.float32)
         if convert_to_abs:
-            box_coords_wrt_anchor = np.clip(np.round(box_coords_wrt_anchor * self.receptive_field_size).astype(np.int32), 0, self.receptive_field_size - 1)
+            box_coords_wrt_anchor = np.clip(np.round(box_coords_wrt_anchor * network.receptive_field_size).astype(np.int32), 0, network.receptive_field_size - 1)
         return box_coords_wrt_anchor
 
     def net_on_every_size(self, inputs_all_sizes, labels, filenames):
@@ -336,7 +335,7 @@ class MultiCellArch:
             net = network.localization_and_classification_path(common_representation, self.opts, self.nclasses)
             net_shape = net.shape.as_list()
             assert net_shape[1] == net_shape[2], 'Different width and height at network output'
-            grid.set_output_shape(net_shape[1], self.receptive_field_size)
+            grid.set_output_shape(net_shape[1], network.receptive_field_size)
             grid.set_flat_start_pos(self.n_boxes)
             self.max_pad_rel = max(self.max_pad_rel, grid.pad_rel)
             output_flat = tf.reshape(net, [-1, grid.n_boxes, CommonEncoding.get_last_layer_n_channels(self.opts, self.nclasses)], name='output_flat')
@@ -344,7 +343,7 @@ class MultiCellArch:
             self.n_boxes += grid.n_boxes
             all_outputs.append(output_flat)
             all_crs.append(cr_flat)
-            if (grid.input_size_w_pad - self.receptive_field_size) / self.opts.step_in_pixels + 1 != grid.output_shape:
+            if (grid.input_size_w_pad - network.receptive_field_size) / self.opts.step_in_pixels + 1 != grid.output_shape:
                 raise Exception('Inconsistent step for input size ' + str(grid.input_size_w_pad) + '. Grid size is ' + str(grid.output_shape) + '.')
         assert self.n_boxes == self.get_expected_num_boxes(), 'Expected number of boxes differs from the real number.'
         all_outputs = tf.concat(all_outputs, axis=1, name='all_outputs')  # (batch_size, nboxes, ?)
@@ -948,18 +947,18 @@ class MultiCellArch:
         if self.opts.encoding_method == 'basic_1':
             dcx_rel = np.clip(np.arctan(dcx_enc) / (np.pi / 2.0 - self.opts.enc_epsilon), -1.0, 1.0)
             dcy_rel = np.clip(np.arctan(dcy_enc) / (np.pi / 2.0 - self.opts.enc_epsilon), -1.0, 1.0)
-            w_rel = np.clip(CommonEncoding.sigmoid(w_enc) * self.opts.enc_wh_a + self.opts.enc_wh_b, 1.0 / self.receptive_field_size, 1.0)
-            h_rel = np.clip(CommonEncoding.sigmoid(h_enc) * self.opts.enc_wh_a + self.opts.enc_wh_b, 1.0 / self.receptive_field_size, 1.0)
+            w_rel = np.clip(CommonEncoding.sigmoid(w_enc) * self.opts.enc_wh_a + self.opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)
+            h_rel = np.clip(CommonEncoding.sigmoid(h_enc) * self.opts.enc_wh_a + self.opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)
         elif self.opts.encoding_method == 'ssd':
             dcx_rel = np.clip(dcx_enc * 0.1, -1.0, 1.0)
             dcy_rel = np.clip(dcy_enc * 0.1, -1.0, 1.0)
-            w_rel = np.clip(np.exp(w_enc * 0.2), 1.0 / self.receptive_field_size, 1.0)
-            h_rel = np.clip(np.exp(h_enc * 0.2), 1.0 / self.receptive_field_size, 1.0)
+            w_rel = np.clip(np.exp(w_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)
+            h_rel = np.clip(np.exp(h_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)
         elif self.opts.encoding_method == 'no_encode':
             dcx_rel = np.clip(dcx_enc, -1.0, 1.0)
             dcy_rel = np.clip(dcy_enc, -1.0, 1.0)
-            w_rel = np.clip(w_enc, 1.0 / self.receptive_field_size, 1.0)
-            h_rel = np.clip(h_enc, 1.0 / self.receptive_field_size, 1.0)
+            w_rel = np.clip(w_enc, 1.0 / network.receptive_field_size, 1.0)
+            h_rel = np.clip(h_enc, 1.0 / network.receptive_field_size, 1.0)
         else:
             raise Exception('Encoding method not recognized.')
 
@@ -993,18 +992,18 @@ class MultiCellArch:
         if self.opts.encoding_method == 'basic_1':
             dcx_rel = np.clip(np.arctan(dcx_enc) / (np.pi / 2.0 - self.opts.enc_epsilon), -1.0, 1.0)  # (batch_size, nboxes)
             dcy_rel = np.clip(np.arctan(dcy_enc) / (np.pi / 2.0 - self.opts.enc_epsilon), -1.0, 1.0)  # (batch_size, nboxes)
-            w_rel = np.clip(CommonEncoding.sigmoid(w_enc) * self.opts.enc_wh_a + self.opts.enc_wh_b, 1.0 / self.receptive_field_size, 1.0)  # (batch_size, nboxes)
-            h_rel = np.clip(CommonEncoding.sigmoid(h_enc) * self.opts.enc_wh_a + self.opts.enc_wh_b, 1.0 / self.receptive_field_size, 1.0)  # (batch_size, nboxes)
+            w_rel = np.clip(CommonEncoding.sigmoid(w_enc) * self.opts.enc_wh_a + self.opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)  # (batch_size, nboxes)
+            h_rel = np.clip(CommonEncoding.sigmoid(h_enc) * self.opts.enc_wh_a + self.opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)  # (batch_size, nboxes)
         elif self.opts.encoding_method == 'ssd':
             dcx_rel = np.clip(dcx_enc * 0.1, -1.0, 1.0)  # (batch_size, nboxes)
             dcy_rel = np.clip(dcy_enc * 0.1, -1.0, 1.0)  # (batch_size, nboxes)
-            w_rel = np.clip(np.exp(w_enc * 0.2), 1.0 / self.receptive_field_size, 1.0)  # (batch_size, nboxes)
-            h_rel = np.clip(np.exp(h_enc * 0.2), 1.0 / self.receptive_field_size, 1.0)  # (batch_size, nboxes)
+            w_rel = np.clip(np.exp(w_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)  # (batch_size, nboxes)
+            h_rel = np.clip(np.exp(h_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)  # (batch_size, nboxes)
         elif self.opts.encoding_method == 'no_encode':
             dcx_rel = np.clip(dcx_enc, -1.0, 1.0)
             dcy_rel = np.clip(dcy_enc, -1.0, 1.0)
-            w_rel = np.clip(w_enc, 1.0 / self.receptive_field_size, 1.0)
-            h_rel = np.clip(h_enc, 1.0 / self.receptive_field_size, 1.0)
+            w_rel = np.clip(w_enc, 1.0 / network.receptive_field_size, 1.0)
+            h_rel = np.clip(h_enc, 1.0 / network.receptive_field_size, 1.0)
         else:
             raise Exception('Encoding method not recognized.')
 
@@ -1092,7 +1091,7 @@ class MultiCellArch:
         area_gt_sq = (sq_boxes_expanded[:, :, 2] - sq_boxes_expanded[:, :, 0]) * (sq_boxes_expanded[:, :, 3] - sq_boxes_expanded[:, :, 1])  # (n_gt, nboxes)
         area_anchors = (anchors_expanded[:, :, 2] - anchors_expanded[:, :, 0]) * (anchors_expanded[:, :, 3] - anchors_expanded[:, :, 1])  # (n_gt, nboxes)
         # ar = area_gt_orig / area_anchors  # (n_gt, nboxes)
-        ar = area_gt_sq / area_anchors  #  n_gt, nboxes)
+        ar = area_gt_sq / area_anchors  #  (n_gt, nboxes)
 
         intersection_xcenter = (xmin + xmax) / 2.0  # (n_gt, nboxes)
         intersection_ycenter = (ymin + ymax) / 2.0  # (n_gt, nboxes)

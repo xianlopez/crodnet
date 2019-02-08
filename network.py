@@ -3,6 +3,9 @@ import tensorflow.contrib.slim as slim
 import CommonEncoding
 
 
+receptive_field_size = 352
+
+
 def common_representation(inputs, lcr):
     with tf.variable_scope('vgg_16'):
         with slim.arg_scope([slim.conv2d], reuse=tf.AUTO_REUSE, weights_initializer=tf.initializers.he_normal()):
