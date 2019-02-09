@@ -30,5 +30,32 @@ class CrodnetOptions:
 
         self.encoding_method = 'ssd'
 
-        self.lcr = 128
+        self.lcr = 512
         self.min_iou_to_compare = 0.4
+
+
+class SingleCellOptions:
+    def __init__(self):
+        self.n_images_per_batch = 10
+        self.n_crops_per_image = 8
+        self.n_comparisons_intra = 5
+        self.n_comparisons_inter = 6
+
+        self.threshold_ar = 0.05
+        self.threshold_pc = 0.99
+        self.threshold_dc = 0.5
+
+        self.threshold_ar_neutral = 0.025
+        self.threshold_pc_neutral = 0.1
+        self.threshold_dc_neutral = 0.75
+
+        self.predict_pc = False
+        self.predict_coordinates = True
+        self.box_per_class = False
+
+        self.loc_loss_factor = 1
+        self.comp_loss_factor = 1
+
+        self.lcr = 512  # Length of Common Representation
+
+        self.encoding_method = 'ssd'

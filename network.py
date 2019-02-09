@@ -4,6 +4,7 @@ import CommonEncoding
 
 
 receptive_field_size = 352
+step_in_pixels = 32 # 2^(num of max pools)
 
 
 def common_representation(inputs, lcr):
@@ -77,3 +78,16 @@ def localization_and_classification_path(net, opts, nclasses):
                 net = slim.conv2d(net, opts.lcr, [1, 1], scope='layer1')
                 net = slim.conv2d(net, n_channels_final, [1, 1], activation_fn=None, normalizer_fn=None, scope='layer2')
     return net
+
+
+def comparison(crs, lcr):
+    # crs: (n_comparisons, 2, lcr):
+    with tf.variable_scope('comparison'):
+        subtraction = crs[:, 0, :] - crs[:, 1, :]  # (n_comparisons, lcr)
+        fc1 = tf.layers.dense(subtraction, lcr, activation=tf.nn.relu, name='fc1')  # (n_comparisons, lcr)
+        comparison = tf.layers.dense(fc1, 2, activation=None, use_bias=False, name='fc2')  # (n_comparisons, 2)
+    return comparison
+
+
+
+
