@@ -1,9 +1,8 @@
 # ======================================================================================================================
-import DataReader
+import TrainDataReader
 import tensorflow as tf
 import tools
 import logging
-from mean_ap import compute_mAP
 import time
 import numpy as np
 import operator
@@ -65,7 +64,7 @@ class TrainEnv:
         nbatches = self.reader.get_nbatches_per_epoch(split)
         step = 0
         loss_mean = 0
-        metrics_mean = np.zeros(shape=(self.network.n_metrics))
+        metrics_mean = np.zeros(shape=(self.single_cell_arch.n_metrics))
         while True:
             try:
                 batch_loss, batch_metrics = sess.run([self.loss, self.metrics])
@@ -115,7 +114,7 @@ class TrainEnv:
                 logging.info('Learning rate: ' + str(learning_rate))
                 step = 0
                 loss_mean = 0
-                metrics_mean = np.zeros(shape=(self.network.n_metrics))
+                metrics_mean = np.zeros(shape=(self.single_cell_arch.n_metrics))
                 iniepoch = time.time()
                 while True:
                     try:
@@ -155,12 +154,12 @@ class TrainEnv:
                     if args.recompute_train:
                         loss_mean, metrics_mean = self.evaluate_on_dataset('train', sess, args)
                         logging.info('Train loss: %.2e' % loss_mean)
-                        for m_idx in range(self.network.n_metrics):
-                            logging.info('Train ' + self.network.metric_names[m_idx] + ': %.2f' % train_metrics[m_idx])
+                        for m_idx in range(self.single_cell_arch.n_metrics):
+                            logging.info('Train ' + self.single_cell_arch.metric_names[m_idx] + ': %.2f' % train_metrics[m_idx])
                     else:
                         logging.info('Mean train loss during epoch: %.2e' % loss_mean)
-                        for m_idx in range(len(self.network.n_metrics)):
-                            logging.info('Mean train ' + self.network.metric_names[m_idx] + ' during epoch: %.2f' % metrics_mean[m_idx])
+                        for m_idx in range(len(self.single_cell_arch.n_metrics)):
+                            logging.info('Mean train ' + self.single_cell_arch.metric_names[m_idx] + ' during epoch: %.2f' % metrics_mean[m_idx])
                     train_losses.append(loss_mean)
                     train_metrics.append(metrics_mean)
 
@@ -170,8 +169,8 @@ class TrainEnv:
                     val_losses.append(val_loss)
                     val_metrics.append(metrics)
                     logging.info('Val loss: %.2e' % val_loss)
-                    for m_idx in range(len(self.network.n_metrics)):
-                        logging.info('Val ' + self.network.metric_names[m_idx] + ': %.2f' % metrics[m_idx])
+                    for m_idx in range(len(self.single_cell_arch.n_metrics)):
+                        logging.info('Val ' + self.single_cell_arch.metric_names[m_idx] + ': %.2f' % metrics[m_idx])
                 else:
                     val_loss = None
 
@@ -245,9 +244,9 @@ class TrainEnv:
 
     # ------------------------------------------------------------------------------------------------------------------
     def generate_graph(self, args):
-        self.network = SingleCellArch.SingleCellArch(args.single_cell_opts, DataReader.get_n_classes(args))
+        self.single_cell_arch = SingleCellArch.SingleCellArch(args.single_cell_opts, TrainDataReader.get_n_classes(args))
         self.define_inputs_and_labels(args)
-        _, self.loss, self.metrics = self.network.make(self.inputs, self.labels, self.filenames)
+        _, self.loss, self.metrics = self.single_cell_arch.make(self.inputs, self.labels, self.filenames)
         self.model_variables = [n.name for n in tf.global_variables()]
         if args.l2_regularization > 0:
             self.loss += L2RegularizationLoss(args)
@@ -262,9 +261,9 @@ class TrainEnv:
 
     # ------------------------------------------------------------------------------------------------------------------
     def define_inputs_and_labels(self, args):
-        self.input_shape = self.network.get_input_shape()
+        self.input_shape = self.single_cell_arch.get_input_shape()
         with tf.device('/cpu:0'):
-            self.reader = DataReader.TrainDataReader(self.input_shape, args, self.network)
+            self.reader = TrainDataReader.TrainDataReader(self.input_shape, args, self.single_cell_arch, self.opts.image_cropper_opts)
             self.inputs, self.labels, self.filenames = self.reader.build_iterator()
         self.classnames = self.reader.classnames
         self.nclasses = len(self.classnames)

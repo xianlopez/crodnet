@@ -118,7 +118,7 @@ class SingleCellArch:
         input_shape = [network.receptive_field_size, network.receptive_field_size]
         return input_shape
 
-    def encode_gt(self, gt_boxes, filename):
+    def encode_gt(self, gt_boxes):
         # Inputs:
         #     gt_boxes: List of GroundTruthBox objects, with relative coordinates (between 0 and 1)
         # Outputs:
@@ -126,9 +126,6 @@ class SingleCellArch:
         #
         # We don't consider the batch dimension here.
         n_gt = len(gt_boxes)
-
-        filename_dec = filename.decode(sys.getdefaultencoding())
-        # print(filename_dec)
 
         if n_gt > 0:
             gt_vec = np.zeros(shape=(n_gt, 4), dtype=np.float32)
@@ -192,6 +189,67 @@ class SingleCellArch:
             labels_enc[6] = self.background_id
 
         return labels_enc
+
+    def encode_gt_from_array(self, gt_boxes):
+        # gt_boxes: (n_gt, 6) [class_id, xmin, ymin, width, height, pc]
+        n_gt = gt_boxes.shape[0]
+        if n_gt > 0:
+            gt_coords = gt_boxes[:, 1:5]  # (n_gt, 4)
+            gt_class_ids = gt_boxes[:, 0]  # (n_gt)
+            gt_pc_incoming = gt_boxes[:, 5]  # (n_gt)
+
+            ar, dc = compute_ar_dc(gt_coords)  # All variables have shape (n_gt)
+            pc = gt_pc_incoming  # (n_gt)
+
+            # Positive boxes:
+            mask_ar = ar > self.opts.threshold_ar  # (n_gt)
+            mask_pc = pc > self.opts.threshold_pc  # (n_gt)
+            mask_dc = dc < self.opts.threshold_dc  # (n_gt)
+            mask_thresholds = mask_ar & mask_pc & mask_dc  # (n_gt)
+            any_match = np.any(mask_thresholds)  # ()
+
+            dc_masked = np.where(mask_thresholds, dc, np.infty * np.ones(shape=(n_gt), dtype=np.float32) ) # (n_gt)
+
+            nearest_valid_gt_idx = np.argmin(dc_masked)  # ()
+
+            # Neutral boxes:
+            mask_ar_neutral = ar > self.opts.threshold_ar_neutral  # (n_gt)
+            mask_pc_neutral = pc > self.opts.threshold_pc_neutral  # (n_gt)
+            mask_dc_neutral = dc < self.opts.threshold_dc_neutral  # (n_gt)
+            mask_thresholds_neutral = mask_ar_neutral & mask_pc_neutral & mask_dc_neutral  # (n_gt)
+            any_neutral = np.any(mask_thresholds_neutral, axis=0)  # ()
+            is_neutral = np.logical_and(any_neutral, np.logical_not(any_match))  # ()
+
+            # Get the coordinates and the class id of the gt box matched:
+            coordinates = gt_coords[nearest_valid_gt_idx, :]  # (4)
+            coordinates_enc = encode_boxes_np(coordinates, self.opts)  # (4)
+            class_id = gt_class_ids[nearest_valid_gt_idx]
+
+            # Negative boxes:
+            is_negative = np.logical_and(np.logical_not(any_match), np.logical_not(is_neutral))  # ()
+            if is_negative:
+                class_id = self.background_id
+
+            # Percent contained associated with each anchor box.
+            # This is the PC of the assigned gt box, if there is any, or otherwise the maximum PC it has.
+            if any_match:
+                pc_associated = pc[nearest_valid_gt_idx]
+            else:
+                pc_associated = np.max(pc)
+
+            # Put all together in one array:
+            labels_enc = np.stack([any_match.astype(np.float32),
+                                   is_neutral.astype(np.float32),
+                                   class_id.astype(np.float32),
+                                   nearest_valid_gt_idx.astype(np.float32),
+                                   pc_associated])
+            labels_enc = np.concatenate([coordinates_enc, labels_enc])  # (9)
+
+        else:
+            labels_enc = np.zeros(shape=(9), dtype=np.float32)
+            labels_enc[6] = self.background_id
+
+        return labels_enc  # (9)
 
     def decode_gt(self, labels_enc, remove_duplicated=True):
         # Inputs:
