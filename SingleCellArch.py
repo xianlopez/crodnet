@@ -1,13 +1,15 @@
+import os
 import tensorflow as tf
 import network
 import numpy as np
 import CommonEncoding
-import sys
+import tools
 from BoundingBoxes import BoundingBox, PredictedBox
+import cv2
 
 
 class SingleCellArch:
-    def __init__(self, options, nclasses):
+    def __init__(self, options, nclasses, outdir=None):
         self.opts = options
         self.nclasses = nclasses + 1 # The last class id is for the background
         self.background_id = self.nclasses - 1
@@ -15,10 +17,15 @@ class SingleCellArch:
         self.batch_size = self.opts.n_images_per_batch * self.opts.n_crops_per_image
         self.n_metrics = 3
         self.metric_names = ['accuracy_conf', 'iou_mean', 'accuracy_comp']
+        self.outdir = outdir
+        self.batch_count = 0
+        if self.opts.debug and self.outdir is None:
+            raise Exception('outdir must be specified in debug is True.')
 
     def make(self, inputs, labels_enc, filenames):
         # inputs: (n_images_per_batch, n_crops_per_image, input_image_size, input_image_size, 3)
-        # labels: (n_images_per_batch, n_crops_per_image, n_labels)
+        # labels_enc: (n_images_per_batch, n_crops_per_image, n_labels)
+        # filenames: (n_images_per_batch)
         inputs_reord = simplify_batch_dimensions(inputs)  # (batch_size, input_image_size, input_image_size, 3)
         labels_enc_reord = simplify_batch_dimensions(labels_enc)  # (batch_size, n_labels)
         common_representation = network.common_representation(inputs_reord, self.opts.lcr)  # (batch_size, 1, 1, lcr)
@@ -26,8 +33,13 @@ class SingleCellArch:
         common_representation = tf.squeeze(common_representation, axis=[1, 2])  # (batch_size, lcr)
         loc_and_classif = tf.squeeze(loc_and_classif, axis=[1, 2])  # (batch_size, 4+nclasses)
         comparisons_pred, comparisons_labels, comparisons_indices = self.make_comparisons(common_representation, labels_enc_reord)
+        # comparisons_pred, indices_all_comparisons: (total_comparisons, 2)
+        # comparisons_labels: (total_comparisons)
         loss, metrics = self.make_loss_and_metrics(loc_and_classif, labels_enc_reord, comparisons_pred,
                                                    comparisons_labels, comparisons_indices)  # ()
+        if self.opts.debug:
+            metrics = tf.py_func(self.write_debug_info, [metrics, inputs_reord, labels_enc_reord, loc_and_classif,
+                                                         comparisons_pred, comparisons_labels, comparisons_indices, filenames], (tf.float32))
         return loc_and_classif, loss, metrics
 
     def make_comparisons(self, common_representation, labels_enc_reord):
@@ -35,6 +47,7 @@ class SingleCellArch:
         # labels_enc_reord: (batch_size, n_labels)
         gt_class_id = CommonEncoding.get_gt_class(labels_enc_reord)  # (batch_size)
         nearest_valid_gt_idx = CommonEncoding.get_nearest_valid_gt_idx(labels_enc_reord)  # (batch_size)
+        mask_neutral = CommonEncoding.get_mask_neutral(labels_enc_reord)  # (batch_size)
         images_range = tf.range(self.opts.n_images_per_batch)  # (n_images_per_batch)
 
         # Indices of intra comprarisons:
@@ -73,7 +86,10 @@ class SingleCellArch:
         gt_class_intra_comp = tf.gather(gt_class_id, random_indices_intra, axis=0)  # (total_comparisons_intra, 2)
         any_background = tf.less(tf.abs(gt_class_intra_comp - self.background_id), 0.5)  # (total_comparisons_intra, 2)
         any_background = tf.reduce_any(any_background, axis=1)  # (total_comparisons_intra)
+        any_neutral = tf.gather(mask_neutral, random_indices_intra, axis=0)  # (total_comparisons_intra, 2)
+        any_neutral = tf.reduce_any(any_neutral, axis=1)  # (total_comparisons_intra)
         labels_comp_intra = tf.logical_and(same_gt_idx, tf.logical_not(any_background))  # (total_comparisons_intra)
+        labels_comp_intra = tf.logical_and(labels_comp_intra, tf.logical_not(any_neutral))  # (total_comparisons_intra)
         labels_comp_inter = tf.zeros(shape=(total_comparisons_inter), dtype=tf.bool)
         labels_all_comparisons = tf.concat([labels_comp_intra, labels_comp_inter], axis=0)  # (total_comparisons)
 
@@ -304,6 +320,82 @@ class SingleCellArch:
             predictions.append(gtbox)
         return predictions
 
+    def write_debug_info(self, metrics, inputs_reord, labels_enc_reord, loc_and_classif, comparisons_pred, comparisons_labels, comparisons_indices, filenames):
+        # inputs_reord: (batch_size, input_image_size, input_image_size, 3)
+        # labels_enc_reord: (batch_size, n_labels)
+        # loc_and_classif: (batch_size, 4+nclasses)
+        # comparisons_pred: (total_comparisons, 2)
+        # comparisons_labels: (total_comparisons)
+        # comparisons_indices: (total_comparisons, 2)
+        # filenames: (n_images_per_batch)
+        self.batch_count += 1
+        batch_dir = os.path.join(self.outdir, 'batch' + str(self.batch_count))
+        os.makedirs(batch_dir)
+        batch_size = self.opts.n_crops_per_image * self.opts.n_images_per_batch
+        filenames_ext = np.tile(np.expand_dims(filenames, axis=-1), [1, self.opts.n_crops_per_image])  # (n_images_per_batch, n_crops_per_image)
+        filenames_reord = np.reshape(filenames_ext, newshape=(batch_size))  # (batch_size)
+        mask_match = CommonEncoding.get_mask_match(labels_enc_reord) > 0.5  # (batch_size)
+        mask_neutral = CommonEncoding.get_mask_neutral(labels_enc_reord) > 0.5  # (batch_size)
+        for i in range(batch_size):
+            name = filenames_reord[i]
+            crop = inputs_reord[i, ...]  # (input_image_size, input_image_size, 3)
+            label_enc = labels_enc_reord[i, :]
+            gt_class = CommonEncoding.get_gt_class(label_enc)
+            gt_coords = CommonEncoding.get_gt_coords(label_enc)
+            is_match = mask_match[i]
+            is_neutral = mask_neutral[i]
+            if is_neutral:
+                crop_path = os.path.join(batch_dir, name + '_neutral.png')
+            else:
+                crop_path = os.path.join(batch_dir, name + '.png')
+                if gt_class != self.background_id:
+                    crop = tools.add_bounding_boxes_to_image(crop, [[gt_class].extend(gt_coords)], color=(255, 0, 0))
+                else:
+                    assert not is_match, 'is_match is True, and gt_class it background_id.'
+                predicted_class = np.argmax(loc_and_classif[i, 4:])
+                predicted_coords = loc_and_classif[i, :4]
+                if predicted_class != self.background_id:
+                    crop = tools.add_bounding_boxes_to_image(crop, [[predicted_class].extend(predicted_coords)], color=(127, 0, 127))
+            cv2.imwrite(crop_path, crop)
+
+        # Comparisons:
+        total_comparisons = (self.opts.n_comparisons_inter + self.opts.n_comparisons_intra) * self.opts.n_images_per_batch
+        intra_dir = os.path.join(batch_dir, 'intra_comparisons')
+        inter_dir = os.path.join(batch_dir, 'inter_comparisons')
+        os.makedirs(intra_dir)
+        os.makedirs(inter_dir)
+        for i in range(total_comparisons):
+            idx1 = comparisons_indices[i, 0]
+            idx2 = comparisons_indices[i, 1]
+            name1 = filenames[idx1]
+            name2 = filenames[idx2]
+            crop1 = inputs_reord[idx1, ...]  # (input_image_size, input_image_size, 3)
+            crop2 = inputs_reord[idx1, ...]  # (input_image_size, input_image_size, 3)
+            any_neutral = mask_neutral[idx1] or mask_neutral[idx2]
+            any_match = mask_match[idx1] or mask_match[idx2]
+            if any_neutral:
+                gt_comp = 'neutral'
+            elif not any_match:
+                gt_comp = 'nomatches'
+            elif comparisons_labels[i] > 0.5:
+                gt_comp = 'same'
+            else:
+                gt_comp = 'diff'
+            if comparisons_pred[i, 1] > comparisons_pred[i, 0]:
+                pred_comp = 'same'
+            else:
+                pred_comp = 'diff'
+            mosaic_name = 'comp' + str(i) + '_' + name1 + ' - ' + name2 + '_GT:' + gt_comp + '_PRED:' + pred_comp + '.png'
+            if name1 == name2:  # Intra-comparison:
+                mosaic_path = os.path.join(intra_dir, mosaic_name)
+            else:  # Inter-comparison
+                mosaic_path = os.path.join(inter_dir, mosaic_name)
+            separator = np.zeros(shape=(network.receptive_field_size, 10, 3), dtype=np.float32)
+            mosaic = np.concatenate([crop1, separator, crop2], axis=0)  # (2*input_image_size+10, input_image_size, 3)
+            cv2.imwrite(mosaic_path, mosaic)
+
+        return metrics
+
 
 def classification_loss_and_metric(pred_conf, mask_match, mask_neutral, gt_class, zeros, n_positives):
     # pred_conf: (batch_size, nclasses)
@@ -328,6 +420,7 @@ def classification_loss_and_metric(pred_conf, mask_match, mask_neutral, gt_class
         hits_no_neutral = tf.where(tf.logical_not(mask_neutral), hits, zeros)  # (batch_size)
         n_hits = tf.reduce_sum(hits_no_neutral)  # ()
         accuracy_conf = tf.divide(n_hits, tf.maximum(tf.cast(n_negatives + n_positives, tf.float32), 1))  # ()
+
     return loss_conf, accuracy_conf
 
 
@@ -354,11 +447,12 @@ def localization_loss_and_metric(pred_coords, mask_match, gt_coords, zeros, n_po
     return loss_loc, iou_mean
 
 
-def comparison_loss_and_metric(comparisons_pred, comparisons_labels, comparisons_indices, mask_match, comp_loss_factor):
+def comparison_loss_and_metric(comparisons_pred, comparisons_labels, comparisons_indices, mask_match, mask_neutral, comp_loss_factor):
     # comparisons_pred: (total_comparisons, 2)
     # comparisons_labels: (total_comparisons)
     # comparisons_indices: (total_comparisons, 2)
     # mask_match: (batch_size)
+    # mask_neutral: (batch_size)
     with tf.variable_scope('comp_loss'):
         comparisons_labels_int = tf.cast(comparisons_labels, tf.int32)
         loss_orig = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=comparisons_labels_int,
@@ -366,9 +460,13 @@ def comparison_loss_and_metric(comparisons_pred, comparisons_labels, comparisons
         comparisons_matches = tf.gather(mask_match, comparisons_indices, axis=0)  # (total_comparisons, 2)
         print('comparisons_matches.shape = ' + str(comparisons_matches.shape))
         any_match = tf.reduce_any(comparisons_matches, axis=1)  # (total_comparisons)
+        comparisons_neutrals = tf.gather(mask_neutral, comparisons_indices, axis=0)  # (total_comparisons, 2)
+        any_neutral = tf.reduce_any(comparisons_neutrals, axis=1)  # (total_comparisons)
         zeros = tf.zeros_like(any_match, dtype=tf.float32)  # (total_comparisons)
-        loss_matches = tf.where(any_match, loss_orig, zeros, name='loss_match')  # (total_comparisons)
-        n_matches = tf.reduce_sum(tf.cast(any_match, tf.int32))  # ()
+        # TODO: Here we are supressing every case in which there is a neutral crop. If it is an inter-comparison, that's not necessary.
+        comps_to_consider = tf.logical_and(any_match, tf.logical_not(any_neutral))  # (total_comparisons)
+        loss_matches = tf.where(comps_to_consider, loss_orig, zeros, name='loss_match')  # (total_comparisons)
+        n_matches = tf.reduce_sum(tf.cast(comps_to_consider, tf.int32))  # ()
         n_matches_safe = tf.maximum(n_matches, 1)  # ()
         loss_comp = tf.reduce_sum(loss_matches)  # ()
         loss_comp = tf.divide(loss_comp, n_matches_safe, name='loss_summed')

@@ -59,3 +59,5 @@ class SingleCellOptions:
         self.lcr = 512  # Length of Common Representation
 
         self.encoding_method = 'ssd'
+
+        self.debug = False
