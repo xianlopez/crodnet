@@ -10,6 +10,7 @@ import sys
 import DataAugmentation
 import Resizer
 import ImageCropper
+import network
 
 
 def get_n_classes(args):
@@ -25,7 +26,8 @@ class TrainDataReader:
     def __init__(self, input_shape, opts, single_cell_arch):
 
         self.single_cell_arch = single_cell_arch
-        self.n_images_per_batch = opts.n_images_per_batch
+        self.n_images_per_batch = opts.single_cell_opts.n_images_per_batch
+        self.n_crops_per_image = opts.single_cell_opts.n_crops_per_image
         self.input_width = input_shape[0]
         self.input_height = input_shape[1]
         self.num_workers = opts.num_workers
@@ -50,7 +52,7 @@ class TrainDataReader:
 
         self.shuffle_data = opts.shuffle_data
 
-        self.image_cropper = ImageCropper.ImageCropper(opts.image_cropper_opts, self.single_cell_arch)
+        self.image_cropper = ImageCropper.ImageCropper(opts.image_cropper_opts, self.single_cell_arch, opts.single_cell_opts.n_crops_per_image)
 
         if self.img_extension == '.jpg' or self.img_extension == '.JPEG':
             self.parse_function = parse_jpg
@@ -59,10 +61,10 @@ class TrainDataReader:
         else:
             raise Exception('Images format not recognized.')
 
-        self.data_aug_opts = args.data_aug_opts
+        self.data_aug_opts = opts.data_aug_opts
 
         if self.data_aug_opts.apply_data_augmentation:
-            data_augmenter = DataAugmentation.DataAugmentation(args, self.input_width, self.input_height)
+            data_augmenter = DataAugmentation.DataAugmentation(opts, self.input_width, self.input_height)
             self.data_aug_func = data_augmenter.data_augmenter
 
         return
@@ -251,9 +253,12 @@ class TrainDataReader:
         # image: (height, width, 3)
         # bboxes: (n_gt, 6)
         # filename: ()
-        crops, labels_enc = self.image_cropper.take_crops_on_image(image, bboxes)
+        crops, labels_enc = tf.py_func(self.image_cropper.take_crops_on_image, [image, bboxes], (tf.float32, tf.float32))
+        crops.set_shape((self.n_crops_per_image, network.receptive_field_size, network.receptive_field_size, 3))
+        labels_enc.set_shape((self.n_crops_per_image, 9))
+        # crops, labels_enc = self.image_cropper.take_crops_on_image(image, bboxes)
         # crops: (n_crops_per_image, receptive_field_size, receptive_field_size, 3)
-        # labels_enc: (n_labels)
+        # labels_enc: (n_crops_per_image, n_labels)
         return crops, labels_enc, filename
 
 

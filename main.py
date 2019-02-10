@@ -146,9 +146,9 @@ def parse_args():
 def train(args):
     print('run mode: train')
 
-    bln = TrainEnv.TrainEnv(args, 'train')
+    bln = TrainEnv.TrainEnv(args)
 
-    result = bln.train(args)
+    result = bln.train()
 
     return result
 
@@ -156,9 +156,9 @@ def train(args):
 def evaluate(args):
     print('run mode: evaluate')
 
-    bln = TrainEnv.TrainEnv(args, 'evaluate')
+    bln = TrainEnv.TrainEnv(args)
 
-    result = bln.evaluate(args, args.split)
+    result = bln.evaluate(args.split)
 
     return result
 

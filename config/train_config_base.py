@@ -1,7 +1,8 @@
 from mean_ap import MeanAPOpts
 from DataAugmentation import DataAugOpts
-from CrodnetOptions import CrodnetOptions
+import CrodnetOptions
 from LRScheduler import LRPolicies, LRSchedulerOpts
+from ImageCropper import ImageCropperOptions
 
 
 
@@ -53,14 +54,13 @@ class TrainConfiguration:
 
     lr_scheduler_opts = LRSchedulerOpts(LRPolicies.onCommand)
 
-
-    ##################################
-    ####### DATA AUGMENTATION ########
     data_aug_opts = DataAugOpts()
-    ##################################
 
+    crodnet_opts = CrodnetOptions.CrodnetOptions()
 
-    crodnet_opts = CrodnetOptions()
+    single_cell_opts = CrodnetOptions.SingleCellOptions()
+
+    image_cropper_opts = ImageCropperOptions()
 
 
     ##################################

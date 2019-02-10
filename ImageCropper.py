@@ -4,24 +4,24 @@ import network
 
 
 class ImageCropperOptions:
-    def __init__(self, n_crops_per_image):
-        self.n_crops_per_image = n_crops_per_image
+    def __init__(self):
         self.padding_factor = 0.5
         self.min_side_scale = 0.2
         self.max_side_scale = 0.9
 
 
 class ImageCropper:
-    def __init__(self, image_cropper_opts, single_cell_arch):
+    def __init__(self, image_cropper_opts, single_cell_arch, n_crops_per_image):
         self.opts = image_cropper_opts
         self.single_cell_arch = single_cell_arch
+        self.n_crops_per_image = n_crops_per_image
 
     def take_crops_on_image(self, image, bboxes):
         orig_height, orig_width, _ = image.shape
         padded_image, padded_height, padded_width = self.pad_image(image, orig_height, orig_width)
-        crops = np.zeros(shape=(self.opts.n_crops_per_image, network.receptive_field_size, network.receptive_field_size, 3), dtype=np.float32)
-        labels_enc = np.zeros(shape=(self.opts.n_crops_per_image, self.single_cell_arch.n_labels), dtype=np.float32)
-        for i in range(self.opts.n_crops_per_image):
+        crops = np.zeros(shape=(self.n_crops_per_image, network.receptive_field_size, network.receptive_field_size, 3), dtype=np.float32)
+        labels_enc = np.zeros(shape=(self.n_crops_per_image, self.single_cell_arch.n_labels), dtype=np.float32)
+        for i in range(self.n_crops_per_image):
             this_crop, this_label_enc = self.make_crop_keep_one_box_and_resize(padded_image, bboxes, padded_width, padded_height)
             crops[i, :, :, :] = this_crop
             labels_enc[i, :] = this_label_enc
@@ -31,9 +31,9 @@ class ImageCropper:
         padded_height = orig_height * (1 + 2 * self.opts.padding_factor)
         padded_width = orig_width * (1 + 2 * self.opts.padding_factor)
         increment_top = int(np.round((padded_height - orig_height) / 2))
-        increment_bottom = padded_height - orig_height - increment_top
+        increment_bottom = int(padded_height - orig_height - increment_top)
         increment_left = int(np.round((padded_width - orig_width) / 2))
-        increment_right = padded_width - orig_width - increment_left
+        increment_right = int(padded_width - orig_width - increment_left)
         padded_image = cv2.copyMakeBorder(image, increment_top, increment_bottom, increment_left, increment_right, cv2.BORDER_CONSTANT)
         return padded_image, padded_height, padded_width
 
@@ -141,6 +141,9 @@ def make_patch_shape(img_width, img_height, min_scale, max_scale):
     scale = np.random.rand() * (max_scale - min_scale) + min_scale
     patch_side = np.sqrt(scale * float(img_width) * float(img_height))
     patch_side = np.minimum(np.maximum(np.round(patch_side), 1), img_width).astype(np.int32)
+    print('patch_side = ' + str(patch_side))
+    print('img_width = ' + str(img_width))
+    print('img_height = ' + str(img_height))
     x0 = np.random.randint(img_width - patch_side + 1)
     y0 = np.random.randint(img_height - patch_side + 1)
     # Convert to relative coordinates:

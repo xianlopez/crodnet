@@ -13,7 +13,7 @@ class SingleCellArch:
         self.opts = options
         self.nclasses = nclasses + 1 # The last class id is for the background
         self.background_id = self.nclasses - 1
-        self.n_labels = 7
+        self.n_labels = 9
         self.batch_size = self.opts.n_images_per_batch * self.opts.n_crops_per_image
         self.n_metrics = 3
         self.metric_names = ['accuracy_conf', 'iou_mean', 'accuracy_comp']
@@ -53,19 +53,19 @@ class SingleCellArch:
         # Indices of intra comprarisons:
         total_comparisons_intra = self.opts.n_images_per_batch * self.opts.n_comparisons_intra
         image_indices_comp_intra = tf.tile(tf.expand_dims(images_range, axis=-1), [1, self.opts.n_comparisons_intra])  # (n_images_per_batch, n_comparisons_intra)
-        image_indices_comp_intra = tf.reshape(image_indices_comp_intra, (total_comparisons_intra))  # (total_comparisons_intra)
+        image_indices_comp_intra = tf.reshape(image_indices_comp_intra, [total_comparisons_intra])  # (total_comparisons_intra)
         # image_indices_comp_intra: [0, 0, ..., 0, 1, 1, ..., 1, ..., n_images_per_batch, n_images_per_batch, ..., n_images_per_batch]
         image_indices_comp_intra_exp = tf.tile(tf.expand_dims(image_indices_comp_intra, axis=-1), [1, 2])  # (total_comparisons_intra, 2)
         # Generate random indices relative to their image:
-        crop_indices_intra = tf.random.uniform(shape=(total_comparisons_intra, 2), maxval=self.opts.n_crops_per_image, dtype=tf.int32)
+        crop_indices_intra = tf.random_uniform(shape=(total_comparisons_intra, 2), maxval=self.opts.n_crops_per_image, dtype=tf.int32)
         # Convert this relative indices to absolute:
         random_indices_intra = crop_indices_intra + self.opts.n_crops_per_image * image_indices_comp_intra_exp  # (total_comparisons_intra, 2)
 
         # Indices of inter comparisons:
         total_comparisons_inter = self.opts.n_images_per_batch * self.opts.n_comparisons_inter
-        crop_indices_inter = tf.random.uniform(shape=(total_comparisons_inter, 2), maxval=self.opts.n_crops_per_image, dtype=tf.int32)
-        image_indices_comp_inter_left = tf.random.uniform(shape=(total_comparisons_inter), maxval=self.opts.n_images_per_batch, dtype=tf.int32)
-        image_indices_distance = tf.random.uniform(shape=(total_comparisons_inter), minval=1, maxval=self.opts.n_images_per_batch, dtype=tf.int32)
+        crop_indices_inter = tf.random_uniform(shape=(total_comparisons_inter, 2), maxval=self.opts.n_crops_per_image, dtype=tf.int32)
+        image_indices_comp_inter_left = tf.random_uniform(shape=[total_comparisons_inter], maxval=self.opts.n_images_per_batch, dtype=tf.int32)
+        image_indices_distance = tf.random_uniform(shape=[total_comparisons_inter], minval=1, maxval=self.opts.n_images_per_batch, dtype=tf.int32)
         image_indices_comp_inter_right = tf.floormod(image_indices_comp_inter_left + image_indices_distance, self.opts.n_images_per_batch)
         image_indices_comp_inter = tf.stack([image_indices_comp_inter_left, image_indices_comp_inter_right], axis=-1)  # (total_comparisons_inter, 2)
         random_indices_inter = crop_indices_inter + self.opts.n_crops_per_image * image_indices_comp_inter  # (total_comparisons_inter, 2)
@@ -73,20 +73,18 @@ class SingleCellArch:
         # CRs of comparisons:
         indices_all_comparisons = tf.concat([random_indices_intra, random_indices_inter], axis=0)  # (total_comparisons, 2)
         crs_all_comparisons = tf.gather(common_representation, indices_all_comparisons, axis=0)  # (total_comparisons, 2, lcr)
-        print('crs_all_comparisons.shape = ' + str(crs_all_comparisons.shape))
 
         # Comparisons:
         comparisons_pred = network.comparison(crs_all_comparisons, self.opts.lcr)  # (total_comparisons, 2)
-        print('comparisons_pred.shape = ' + str(comparisons_pred.shape))
 
         # Labels of comparisons:
         gt_idx_intra_comp = tf.gather(nearest_valid_gt_idx, random_indices_intra, axis=0)  # (total_comparisons_intra, 2)
-        print('gt_idx_intra_comp.shape = ' + str(gt_idx_intra_comp.shape))
         same_gt_idx = tf.less(tf.abs(gt_idx_intra_comp[:, 0] - gt_idx_intra_comp[:, 1]), 0.5)  # (total_comparisons_intra)
         gt_class_intra_comp = tf.gather(gt_class_id, random_indices_intra, axis=0)  # (total_comparisons_intra, 2)
         any_background = tf.less(tf.abs(gt_class_intra_comp - self.background_id), 0.5)  # (total_comparisons_intra, 2)
         any_background = tf.reduce_any(any_background, axis=1)  # (total_comparisons_intra)
         any_neutral = tf.gather(mask_neutral, random_indices_intra, axis=0)  # (total_comparisons_intra, 2)
+        any_neutral = tf.greater(any_neutral, 0.5)
         any_neutral = tf.reduce_any(any_neutral, axis=1)  # (total_comparisons_intra)
         labels_comp_intra = tf.logical_and(same_gt_idx, tf.logical_not(any_background))  # (total_comparisons_intra)
         labels_comp_intra = tf.logical_and(labels_comp_intra, tf.logical_not(any_neutral))  # (total_comparisons_intra)
@@ -108,20 +106,26 @@ class SingleCellArch:
         gt_class_ids = CommonEncoding.get_gt_class(labels_enc_reord)  # (batch_size)
         gt_coords = CommonEncoding.get_gt_coords(labels_enc_reord)  # (batch_size)
 
-        zeros = tf.zeros_like(mask_match)  # (batch_size)
+        mask_match = tf.greater(mask_match, 0.5)
+        mask_neutral = tf.greater(mask_neutral, 0.5)
+
+        zeros = tf.zeros_like(mask_match, dtype=tf.float32)  # (batch_size)
         n_positives = tf.reduce_sum(tf.cast(mask_match, tf.int32), name='n_positives')  # ()
 
-        conf_loss, accuracy_conf = classification_loss_and_metric(pred_conf, mask_match, mask_neutral, gt_class_ids, zeros, n_positives)
+        conf_loss, accuracy_conf = classification_loss_and_metric(pred_conf, mask_match, mask_neutral,
+                                                                  gt_class_ids, zeros, n_positives)
         tf.summary.scalar("conf_loss", conf_loss)
         tf.summary.scalar("accuracy_conf", accuracy_conf)
         total_loss = conf_loss
 
-        loc_loss, iou_mean = localization_loss_and_metric(pred_coords, mask_match, gt_coords, zeros, n_positives, self.opts.loc_loss_factor, self.opts)
+        loc_loss, iou_mean = localization_loss_and_metric(pred_coords, mask_match, gt_coords, zeros, n_positives,
+                                                          self.opts.loc_loss_factor, self.opts)
         tf.summary.scalar("loc_loss", loc_loss)
         tf.summary.scalar("iou_mean", iou_mean)
         total_loss += loc_loss
 
-        comp_loss, accuracy_comp = comparison_loss_and_metric(comparisons_pred, comparisons_labels, comparisons_indices, mask_match, self.opts.comp_loss_factor)
+        comp_loss, accuracy_comp = comparison_loss_and_metric(comparisons_pred, comparisons_labels, comparisons_indices,
+                                                              mask_match, mask_neutral, self.opts.comp_loss_factor)
         tf.summary.scalar("comp_loss", comp_loss)
         tf.summary.scalar("accuracy_comp", accuracy_comp)
         total_loss += comp_loss
@@ -405,7 +409,8 @@ def classification_loss_and_metric(pred_conf, mask_match, mask_neutral, gt_class
     # zeros: (batch_size)
     # n_positives: ()
     with tf.variable_scope('conf_loss'):
-        loss_orig = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=gt_class, logits=pred_conf, name='loss_orig')  # (batch_size)
+        gt_class_int = tf.cast(gt_class, tf.int32)
+        loss_orig = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=gt_class_int, logits=pred_conf, name='loss_orig')  # (batch_size)
         loss_positives = tf.where(mask_match, loss_orig, zeros, name='loss_positives')  # (batch_size)
         mask_negatives = tf.logical_and(tf.logical_not(mask_match), tf.logical_not(mask_neutral), name='mask_negatives')  # (batch_size)
         loss_negatives = tf.where(mask_negatives, loss_orig, zeros, name='loss_negatives')
@@ -415,8 +420,8 @@ def classification_loss_and_metric(pred_conf, mask_match, mask_neutral, gt_class
         loss_conf = tf.reduce_sum(loss_pos_scaled + loss_neg_scaled, name='loss_conf')  # ()
 
         # Metric:
-        predicted_class = tf.argmax(pred_conf, axis=1)  # (batch_size)
-        hits = tf.equal(gt_class, predicted_class)  # (batch_size)
+        predicted_class = tf.argmax(pred_conf, axis=1, output_type=tf.int32)  # (batch_size)
+        hits = tf.cast(tf.equal(gt_class_int, predicted_class), tf.float32)  # (batch_size)
         hits_no_neutral = tf.where(tf.logical_not(mask_neutral), hits, zeros)  # (batch_size)
         n_hits = tf.reduce_sum(hits_no_neutral)  # ()
         accuracy_conf = tf.divide(n_hits, tf.maximum(tf.cast(n_negatives + n_positives, tf.float32), 1))  # ()
@@ -434,16 +439,17 @@ def localization_loss_and_metric(pred_coords, mask_match, gt_coords, zeros, n_po
         n_positives_safe = tf.maximum(tf.cast(n_positives, tf.float32), 1)
         localization_loss = CommonEncoding.smooth_L1_loss(gt_coords, pred_coords)  # (batch_size)
         localization_loss_matches = tf.where(mask_match, localization_loss, zeros, name='loss_match')  # (batch_size)
-        loss_loc_scaled = tf.divide(localization_loss_matches, n_positives_safe, name='loss_scaled')  # (batch_size)
-        loss_loc = tf.reduce_sum(loss_loc_scaled, name='loss_summed')  # ()
-        loss_loc = tf.multiply(loss_loc, loc_loss_factor, name='loss_loc')  # ()
+        loss_loc_summed = tf.reduce_sum(localization_loss_matches, name='loss_summed')  # ()
+        loss_loc_scaled = tf.divide(loss_loc_summed, n_positives_safe, name='loss_scaled')  # ()
+        loss_loc = tf.multiply(loss_loc_scaled, loc_loss_factor, name='loss_loc')  # ()
 
         # Metric:
         pred_coords_dec = decode_boxes_tf(pred_coords, opts)  # (batch_size, 4)
         gt_coords_dec = decode_boxes_tf(gt_coords, opts)  # (batch_size, 4)
         iou = compute_iou_tf(pred_coords_dec, gt_coords_dec)  # (batch_size)
         iou_matches = tf.where(mask_match, iou, zeros)  # (batch_size)
-        iou_mean = tf.divide(iou_matches, n_positives_safe, name='iou_mean')  # ()
+        iou_summed = tf.reduce_sum(iou_matches)  # ()
+        iou_mean = tf.divide(iou_summed, n_positives_safe, name='iou_mean')  # ()
     return loss_loc, iou_mean
 
 
@@ -458,7 +464,6 @@ def comparison_loss_and_metric(comparisons_pred, comparisons_labels, comparisons
         loss_orig = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=comparisons_labels_int,
                                                                    logits=comparisons_pred, name='loss_orig')  # (total_comparisons)
         comparisons_matches = tf.gather(mask_match, comparisons_indices, axis=0)  # (total_comparisons, 2)
-        print('comparisons_matches.shape = ' + str(comparisons_matches.shape))
         any_match = tf.reduce_any(comparisons_matches, axis=1)  # (total_comparisons)
         comparisons_neutrals = tf.gather(mask_neutral, comparisons_indices, axis=0)  # (total_comparisons, 2)
         any_neutral = tf.reduce_any(comparisons_neutrals, axis=1)  # (total_comparisons)
@@ -466,15 +471,15 @@ def comparison_loss_and_metric(comparisons_pred, comparisons_labels, comparisons
         # TODO: Here we are supressing every case in which there is a neutral crop. If it is an inter-comparison, that's not necessary.
         comps_to_consider = tf.logical_and(any_match, tf.logical_not(any_neutral))  # (total_comparisons)
         loss_matches = tf.where(comps_to_consider, loss_orig, zeros, name='loss_match')  # (total_comparisons)
-        n_matches = tf.reduce_sum(tf.cast(comps_to_consider, tf.int32))  # ()
+        n_matches = tf.reduce_sum(tf.cast(comps_to_consider, tf.float32))  # ()
         n_matches_safe = tf.maximum(n_matches, 1)  # ()
         loss_comp = tf.reduce_sum(loss_matches)  # ()
         loss_comp = tf.divide(loss_comp, n_matches_safe, name='loss_summed')
         loss_comp = tf.multiply(loss_comp, comp_loss_factor, name='loss_comp')  # ()
 
         # Metric:
-        predicted_class = tf.argmax(comparisons_pred, axis=1)  # (total_comparisons)
-        hits = tf.equal(comparisons_labels_int, predicted_class)  # (total_comparisons)
+        predicted_class = tf.argmax(comparisons_pred, axis=1, output_type=tf.int32)  # (total_comparisons)
+        hits = tf.cast(tf.equal(comparisons_labels_int, predicted_class), tf.float32)  # (total_comparisons)
         hits_matches = tf.where(any_match, hits, zeros)  # (total_comparisons)
         n_hits = tf.reduce_sum(hits_matches)  # ()
         accuracy_comp = tf.divide(n_hits, n_matches_safe)  # ()
@@ -486,7 +491,7 @@ def simplify_batch_dimensions(x):
     full_shape = tf.shape(x)
     left_dimensions = full_shape[:2]
     right_dimensions = full_shape[2:]
-    batch_size = left_dimensions[0] * left_dimensions[1]
+    batch_size = tf.expand_dims(left_dimensions[0] * left_dimensions[1], axis=0)
     new_shape = tf.concat([batch_size, right_dimensions], axis=0)
     x_reord = tf.reshape(x, shape=new_shape)
     return x_reord

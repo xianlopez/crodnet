@@ -73,7 +73,7 @@ def common_representation(inputs, lcr):
 def localization_and_classification_path(net, opts, nclasses):
     n_channels_final = CommonEncoding.get_last_layer_n_channels(opts, nclasses)
     with tf.variable_scope('vgg_16'):
-        with tf.variable_scope('localization'):
+        with tf.variable_scope('loc_and_classif'):
             with slim.arg_scope([slim.conv2d], reuse=tf.AUTO_REUSE, weights_initializer=tf.initializers.he_normal()):
                 net = slim.conv2d(net, opts.lcr, [1, 1], scope='layer1')
                 net = slim.conv2d(net, n_channels_final, [1, 1], activation_fn=None, normalizer_fn=None, scope='layer2')
