@@ -7,13 +7,14 @@ from BoundingBoxes import BoundingBox, PredictedBox
 
 
 class SingleCellArch:
-    def __init__(self, options, nclasses, is_training):
+    def __init__(self, options, nclasses):
         self.opts = options
         self.nclasses = nclasses + 1 # The last class id is for the background
         self.background_id = self.nclasses - 1
-        self.is_training = is_training
         self.n_labels = 7
         self.batch_size = self.opts.n_images_per_batch * self.opts.n_crops_per_image
+        self.n_metrics = 3
+        self.metric_names = ['accuracy_conf', 'iou_mean', 'accuracy_comp']
 
     def make(self, inputs, labels_enc, filenames):
         # inputs: (n_images_per_batch, n_crops_per_image, input_image_size, input_image_size, 3)
@@ -25,12 +26,14 @@ class SingleCellArch:
         common_representation = tf.squeeze(common_representation, axis=[1, 2])  # (batch_size, lcr)
         loc_and_classif = tf.squeeze(loc_and_classif, axis=[1, 2])  # (batch_size, 4+nclasses)
         comparisons_pred, comparisons_labels, comparisons_indices = self.make_comparisons(common_representation, labels_enc_reord)
-        loss = self.make_loss(common_representation, loc_and_classif, labels_enc_reord, comparisons_pred, comparisons_labels, comparisons_indices)  # ()
-        return loc_and_classif, loss
+        loss, metrics = self.make_loss_and_metrics(loc_and_classif, labels_enc_reord, comparisons_pred,
+                                                   comparisons_labels, comparisons_indices)  # ()
+        return loc_and_classif, loss, metrics
 
     def make_comparisons(self, common_representation, labels_enc_reord):
         # common_representation: (batch_size, lcr)
         # labels_enc_reord: (batch_size, n_labels)
+        gt_class_id = CommonEncoding.get_gt_class(labels_enc_reord)  # (batch_size)
         nearest_valid_gt_idx = CommonEncoding.get_nearest_valid_gt_idx(labels_enc_reord)  # (batch_size)
         images_range = tf.range(self.opts.n_images_per_batch)  # (n_images_per_batch)
 
@@ -67,13 +70,16 @@ class SingleCellArch:
         gt_idx_intra_comp = tf.gather(nearest_valid_gt_idx, random_indices_intra, axis=0)  # (total_comparisons_intra, 2)
         print('gt_idx_intra_comp.shape = ' + str(gt_idx_intra_comp.shape))
         same_gt_idx = tf.less(tf.abs(gt_idx_intra_comp[:, 0] - gt_idx_intra_comp[:, 1]), 0.5)  # (total_comparisons_intra)
-        labels_comp_intra = same_gt_idx
+        gt_class_intra_comp = tf.gather(gt_class_id, random_indices_intra, axis=0)  # (total_comparisons_intra, 2)
+        any_background = tf.less(tf.abs(gt_class_intra_comp - self.background_id), 0.5)  # (total_comparisons_intra, 2)
+        any_background = tf.reduce_any(any_background, axis=1)  # (total_comparisons_intra)
+        labels_comp_intra = tf.logical_and(same_gt_idx, tf.logical_not(any_background))  # (total_comparisons_intra)
         labels_comp_inter = tf.zeros(shape=(total_comparisons_inter), dtype=tf.bool)
         labels_all_comparisons = tf.concat([labels_comp_intra, labels_comp_inter], axis=0)  # (total_comparisons)
 
         return comparisons_pred, labels_all_comparisons, indices_all_comparisons
 
-    def make_loss(self, common_representation, loc_and_classif, labels_enc_reord, comparisons_pred, comparisons_labels, comparisons_indices):
+    def make_loss_and_metrics(self, loc_and_classif, labels_enc_reord, comparisons_pred, comparisons_labels, comparisons_indices):
         # common_representation: (batch_size, lcr)
         # loc_and_classif: (batch_size, 4+nclasses)
         # labels_enc_reord: (batch_size, n_labels)
@@ -89,71 +95,28 @@ class SingleCellArch:
         zeros = tf.zeros_like(mask_match)  # (batch_size)
         n_positives = tf.reduce_sum(tf.cast(mask_match, tf.int32), name='n_positives')  # ()
 
-        conf_loss = self.classification_loss(pred_conf, mask_match, mask_neutral, gt_class_ids, zeros, n_positives)
+        conf_loss, accuracy_conf = classification_loss_and_metric(pred_conf, mask_match, mask_neutral, gt_class_ids, zeros, n_positives)
         tf.summary.scalar("conf_loss", conf_loss)
+        tf.summary.scalar("accuracy_conf", accuracy_conf)
         total_loss = conf_loss
 
-        loc_loss = self.localization_loss(pred_coords, mask_match, gt_coords, zeros, n_positives)
+        loc_loss, iou_mean = localization_loss_and_metric(pred_coords, mask_match, gt_coords, zeros, n_positives, self.opts.loc_loss_factor, self.opts)
         tf.summary.scalar("loc_loss", loc_loss)
+        tf.summary.scalar("iou_mean", iou_mean)
         total_loss += loc_loss
 
-        comp_loss = self.comparison_loss(comparisons_pred, comparisons_labels, comparisons_indices, mask_match)
+        comp_loss, accuracy_comp = comparison_loss_and_metric(comparisons_pred, comparisons_labels, comparisons_indices, mask_match, self.opts.comp_loss_factor)
         tf.summary.scalar("comp_loss", comp_loss)
+        tf.summary.scalar("accuracy_comp", accuracy_comp)
         total_loss += comp_loss
 
-        return total_loss
+        metrics = tf.stack([accuracy_conf, iou_mean, accuracy_comp])  # (n_metrics)
 
-    def classification_loss(self, pred_conf, mask_match, mask_neutral, gt_class, zeros, n_positives):
-        # classif_pred: (batch_size, nclasses)
-        # mask_match: (batch_size)
-        # mask_negative: (batch_size)
-        # gt_class: (batch_size)
-        # zeros: (batch_size)
-        # n_positives: ()
-        with tf.variable_scope('conf_loss'):
-            loss_orig = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=gt_class, logits=pred_conf, name='loss_orig')  # (batch_size)
-            loss_positives = tf.where(mask_match, loss_orig, zeros, name='loss_positives')  # (batch_size)
-            mask_negatives = tf.logical_and(tf.logical_not(mask_match), tf.logical_not(mask_neutral), name='mask_negatives')  # (batch_size)
-            loss_negatives = tf.where(mask_negatives, loss_orig, zeros, name='loss_negatives')
-            n_negatives = tf.reduce_sum(tf.cast(mask_negatives, tf.int32), name='n_negatives')  # ()
-            loss_pos_scaled = tf.divide(loss_positives, tf.maximum(tf.cast(n_positives, tf.float32), 1), name='loss_pos_scaled')  # (batch_size)
-            loss_neg_scaled = tf.divide(loss_negatives, tf.maximum(tf.cast(n_negatives, tf.float32), 1), name='loss_neg_scaled')  # (batch_size)
-            loss_conf = tf.reduce_sum(loss_pos_scaled + loss_neg_scaled, name='loss_conf')  # ()
-        return loss_conf
+        return total_loss, metrics
 
-    def localization_loss(self, pred_coords, mask_match, gt_coords, zeros, n_positives):
-        # pred_coords: (batch_size, 4)
-        # mask_match: (batch_size)
-        # gt_coords: (batch_size, 4)
-        # zeros: (batch_size)
-        # n_positives: ()
-        with tf.variable_scope('loc_loss'):
-            localization_loss = CommonEncoding.smooth_L1_loss(gt_coords, pred_coords)  # (batch_size)
-            localization_loss_matches = tf.where(mask_match, localization_loss, zeros, name='loss_match')  # (batch_size)
-            loss_loc_scaled = tf.divide(localization_loss_matches, tf.maximum(tf.cast(n_positives, tf.float32), 1), name='loss_scaled')  # (batch_size)
-            loss_loc = tf.reduce_sum(loss_loc_scaled, name='loss_summed')  # ()
-            loss_loc = tf.multiply(loss_loc, self.opts.loc_loss_factor, name='loss_loc')  # ()
-        return loss_loc
-
-    def comparison_loss(self, comparisons_pred, comparisons_labels, comparisons_indices, mask_match):
-        # comparisons_pred: (total_comparisons, 2)
-        # comparisons_labels: (total_comparisons)
-        # comparisons_indices: (total_comparisons, 2)
-        # mask_match: (batch_size)
-        with tf.variable_scope('comp_loss'):
-            comparisons_labels_int = tf.cast(comparisons_labels, tf.int32)
-            loss_orig = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=comparisons_labels_int,
-                                                                       logits=comparisons_pred, name='loss_orig')  # (total_comparisons)
-            comparisons_matches = tf.gather(mask_match, comparisons_indices, axis=0)  # (total_comparisons, 2)
-            print('comparisons_matches.shape = ' + str(comparisons_matches.shape))
-            any_match = tf.reduce_any(comparisons_matches, axis=1)  # (total_comparisons)
-            zeros = tf.zeros_like(any_match, dtype=tf.float32)
-            loss_matches = tf.where(any_match, loss_orig, zeros, name='loss_match')  # (total_comparisons)
-            n_matches = tf.reduce_sum(tf.cast(any_match, tf.int32))  # ()
-            loss_comp = tf.reduce_sum(loss_matches)  # ()
-            loss_comp = tf.divide(loss_comp, tf.maximum(n_matches, 1), name='loss_summed')
-            loss_comp = tf.multiply(loss_comp, self.opts.comp_loss_factor, name='loss_comp')  # ()
-        return loss_comp
+    def get_input_shape(self):
+        input_shape = [network.receptive_field_size, network.receptive_field_size]
+        return input_shape
 
     def encode_gt(self, gt_boxes, filename):
         # Inputs:
@@ -201,7 +164,7 @@ class SingleCellArch:
 
             # Get the coordinates and the class id of the gt box matched:
             coordinates = gt_vec[nearest_valid_gt_idx, :]  # (4)
-            coordinates_enc = encode_boxes(coordinates, self.opts)  # (4)
+            coordinates_enc = encode_boxes_np(coordinates, self.opts)  # (4)
             class_id = gt_class_ids[nearest_valid_gt_idx]
 
             # Negative boxes:
@@ -242,7 +205,7 @@ class SingleCellArch:
         # We don't consider the batch dimension here.
         gt_boxes = []
         coords_enc = labels_enc[:4]  # (4)
-        coords_raw = decode_boxes(coords_enc, self.opts)  # (4)
+        coords_raw = decode_boxes_np(coords_enc, self.opts)  # (4)
         if labels_enc[4] > 0.5:
             classid = int(np.round(labels_enc[6]))
             percent_contained = np.clip(labels_enc[8], 0.0, 1.0)
@@ -265,10 +228,10 @@ class SingleCellArch:
         if self.opts.box_per_class:
             # net_output_coords: (4 * nclasses)
             selected_coords = CommonEncoding.get_selected_coords_np(net_output_conf, net_output_coords, self.nclasses, self.opts.box_per_class)  # (4)
-            pred_coords_raw = decode_boxes(selected_coords, self.opts)  # (4) [xmin, ymin, width, height]
+            pred_coords_raw = decode_boxes_np(selected_coords, self.opts)  # (4) [xmin, ymin, width, height]
         else:
             # net_output_coords: (4)
-            pred_coords_raw = decode_boxes(net_output_coords, self.opts)  # (4) [xmin, ymin, width, height]
+            pred_coords_raw = decode_boxes_np(net_output_coords, self.opts)  # (4) [xmin, ymin, width, height]
         class_id = np.argmax(net_output_conf)  # ()
         predictions = []
         if class_id != self.background_id:
@@ -282,6 +245,84 @@ class SingleCellArch:
                     gtbox.pc = net_output_pc
             predictions.append(gtbox)
         return predictions
+
+
+def classification_loss_and_metric(pred_conf, mask_match, mask_neutral, gt_class, zeros, n_positives):
+    # pred_conf: (batch_size, nclasses)
+    # mask_match: (batch_size)
+    # mask_negative: (batch_size)
+    # gt_class: (batch_size)
+    # zeros: (batch_size)
+    # n_positives: ()
+    with tf.variable_scope('conf_loss'):
+        loss_orig = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=gt_class, logits=pred_conf, name='loss_orig')  # (batch_size)
+        loss_positives = tf.where(mask_match, loss_orig, zeros, name='loss_positives')  # (batch_size)
+        mask_negatives = tf.logical_and(tf.logical_not(mask_match), tf.logical_not(mask_neutral), name='mask_negatives')  # (batch_size)
+        loss_negatives = tf.where(mask_negatives, loss_orig, zeros, name='loss_negatives')
+        n_negatives = tf.reduce_sum(tf.cast(mask_negatives, tf.int32), name='n_negatives')  # ()
+        loss_pos_scaled = tf.divide(loss_positives, tf.maximum(tf.cast(n_positives, tf.float32), 1), name='loss_pos_scaled')  # (batch_size)
+        loss_neg_scaled = tf.divide(loss_negatives, tf.maximum(tf.cast(n_negatives, tf.float32), 1), name='loss_neg_scaled')  # (batch_size)
+        loss_conf = tf.reduce_sum(loss_pos_scaled + loss_neg_scaled, name='loss_conf')  # ()
+
+        # Metric:
+        predicted_class = tf.argmax(pred_conf, axis=1)  # (batch_size)
+        hits = tf.equal(gt_class, predicted_class)  # (batch_size)
+        hits_no_neutral = tf.where(tf.logical_not(mask_neutral), hits, zeros)  # (batch_size)
+        n_hits = tf.reduce_sum(hits_no_neutral)  # ()
+        accuracy_conf = tf.divide(n_hits, tf.maximum(tf.cast(n_negatives + n_positives, tf.float32), 1))  # ()
+    return loss_conf, accuracy_conf
+
+
+def localization_loss_and_metric(pred_coords, mask_match, gt_coords, zeros, n_positives, loc_loss_factor, opts):
+    # pred_coords: (batch_size, 4)  encoded
+    # mask_match: (batch_size)
+    # gt_coords: (batch_size, 4)  encoded
+    # zeros: (batch_size)
+    # n_positives: ()
+    with tf.variable_scope('loc_loss'):
+        n_positives_safe = tf.maximum(tf.cast(n_positives, tf.float32), 1)
+        localization_loss = CommonEncoding.smooth_L1_loss(gt_coords, pred_coords)  # (batch_size)
+        localization_loss_matches = tf.where(mask_match, localization_loss, zeros, name='loss_match')  # (batch_size)
+        loss_loc_scaled = tf.divide(localization_loss_matches, n_positives_safe, name='loss_scaled')  # (batch_size)
+        loss_loc = tf.reduce_sum(loss_loc_scaled, name='loss_summed')  # ()
+        loss_loc = tf.multiply(loss_loc, loc_loss_factor, name='loss_loc')  # ()
+
+        # Metric:
+        pred_coords_dec = decode_boxes_tf(pred_coords, opts)  # (batch_size, 4)
+        gt_coords_dec = decode_boxes_tf(gt_coords, opts)  # (batch_size, 4)
+        iou = compute_iou_tf(pred_coords_dec, gt_coords_dec)  # (batch_size)
+        iou_matches = tf.where(mask_match, iou, zeros)  # (batch_size)
+        iou_mean = tf.divide(iou_matches, n_positives_safe, name='iou_mean')  # ()
+    return loss_loc, iou_mean
+
+
+def comparison_loss_and_metric(comparisons_pred, comparisons_labels, comparisons_indices, mask_match, comp_loss_factor):
+    # comparisons_pred: (total_comparisons, 2)
+    # comparisons_labels: (total_comparisons)
+    # comparisons_indices: (total_comparisons, 2)
+    # mask_match: (batch_size)
+    with tf.variable_scope('comp_loss'):
+        comparisons_labels_int = tf.cast(comparisons_labels, tf.int32)
+        loss_orig = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=comparisons_labels_int,
+                                                                   logits=comparisons_pred, name='loss_orig')  # (total_comparisons)
+        comparisons_matches = tf.gather(mask_match, comparisons_indices, axis=0)  # (total_comparisons, 2)
+        print('comparisons_matches.shape = ' + str(comparisons_matches.shape))
+        any_match = tf.reduce_any(comparisons_matches, axis=1)  # (total_comparisons)
+        zeros = tf.zeros_like(any_match, dtype=tf.float32)  # (total_comparisons)
+        loss_matches = tf.where(any_match, loss_orig, zeros, name='loss_match')  # (total_comparisons)
+        n_matches = tf.reduce_sum(tf.cast(any_match, tf.int32))  # ()
+        n_matches_safe = tf.maximum(n_matches, 1)  # ()
+        loss_comp = tf.reduce_sum(loss_matches)  # ()
+        loss_comp = tf.divide(loss_comp, n_matches_safe, name='loss_summed')
+        loss_comp = tf.multiply(loss_comp, comp_loss_factor, name='loss_comp')  # ()
+
+        # Metric:
+        predicted_class = tf.argmax(comparisons_pred, axis=1)  # (total_comparisons)
+        hits = tf.equal(comparisons_labels_int, predicted_class)  # (total_comparisons)
+        hits_matches = tf.where(any_match, hits, zeros)  # (total_comparisons)
+        n_hits = tf.reduce_sum(hits_matches)  # ()
+        accuracy_comp = tf.divide(n_hits, n_matches_safe)  # ()
+    return loss_comp, accuracy_comp
 
 
 def simplify_batch_dimensions(x):
@@ -322,7 +363,22 @@ def compute_ar_dc(gt_boxes):
     return ar, dc
 
 
-def encode_boxes(coords_raw, opts):
+def compute_iou_tf(boxes1, boxes2):
+    # boxes1: (..., 4) [xmin, ymin, width, height]
+    # boxes2: (..., 4) [xmin, ymin, width, height]
+    xmin = tf.maximum(boxes1[..., 0], boxes2[..., 0])  # (batch_size)
+    ymin = tf.maximum(boxes1[..., 1], boxes2[..., 1])  # (batch_size)
+    xmax = tf.minimum(boxes1[..., 0] + boxes1[..., 2], boxes2[..., 0] + boxes2[..., 2])  # (batch_size)
+    ymax = tf.minimum(boxes1[..., 1] + boxes1[..., 3], boxes2[..., 1] + boxes2[..., 3])  # (batch_size)
+    intersection_area = tf.maximum((xmax - xmin), 0.0) * tf.maximum((ymax - ymin), 0.0)  # (batch_size)
+    boxes1_area = boxes1[..., 2] * boxes1[..., 3]  # (batch_size)
+    boxes2_area = boxes2[..., 2] * boxes2[..., 3]  # (batch_size)
+    union_area = boxes1_area + boxes2_area - intersection_area  # (batch_size)
+    iou = intersection_area / union_area  # (batch_size)
+    return iou
+
+
+def encode_boxes_np(coords_raw, opts):
     # coords_raw: (4)
     xmin = coords_raw[0]
     ymin = coords_raw[1]
@@ -359,7 +415,7 @@ def encode_boxes(coords_raw, opts):
 
     return coords_enc  # (4) [dcx_enc, dcy_enc, w_enc, h_enc]
 
-def decode_boxes(coords_enc, opts):
+def decode_boxes_np(coords_enc, opts):
     # coords_enc: (..., 4)
     dcx_enc = coords_enc[..., 0]
     dcy_enc = coords_enc[..., 1]
@@ -392,6 +448,42 @@ def decode_boxes(coords_enc, opts):
     ymin = yc - 0.5 * height  # (...)
 
     coords_raw = np.stack([xmin, ymin, width, height], axis=-1)  # (..., 4)
+
+    return coords_raw  # (..., 4) [xmin, ymin, width, height]
+
+def decode_boxes_tf(coords_enc, opts):
+    # coords_enc: (..., 4)
+    dcx_enc = coords_enc[..., 0]
+    dcy_enc = coords_enc[..., 1]
+    w_enc = coords_enc[..., 2]
+    h_enc = coords_enc[..., 3]
+
+    # Decoding step:
+    if opts.encoding_method == 'basic_1':
+        dcx_rel = tf.clip_by_value(tf.atan(dcx_enc) / (np.pi / 2.0 - opts.enc_epsilon), -1.0, 1.0)
+        dcy_rel = tf.clip_by_value(tf.atan(dcy_enc) / (np.pi / 2.0 - opts.enc_epsilon), -1.0, 1.0)
+        width = tf.clip_by_value(CommonEncoding.sigmoid(w_enc) * opts.enc_wh_a + opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)
+        height = tf.clip_by_value(CommonEncoding.sigmoid(h_enc) * opts.enc_wh_a + opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)
+    elif opts.encoding_method == 'ssd':
+        dcx_rel = tf.clip_by_value(dcx_enc * 0.1, -1.0, 1.0)
+        dcy_rel = tf.clip_by_value(dcy_enc * 0.1, -1.0, 1.0)
+        width = tf.clip_by_value(tf.exp(w_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)
+        height = tf.clip_by_value(tf.exp(h_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)
+    elif opts.encoding_method == 'no_encode':
+        dcx_rel = tf.clip_by_value(dcx_enc, -1.0, 1.0)
+        dcy_rel = tf.clip_by_value(dcy_enc, -1.0, 1.0)
+        width = tf.clip_by_value(w_enc, 1.0 / network.receptive_field_size, 1.0)
+        height = tf.clip_by_value(h_enc, 1.0 / network.receptive_field_size, 1.0)
+    else:
+        raise Exception('Encoding method not recognized.')
+
+    xc = 0.5 - dcx_rel * 0.5  # (...)
+    yc = 0.5 - dcy_rel * 0.5  # (...)
+
+    xmin = xc - 0.5 * width  # (...)
+    ymin = yc - 0.5 * height  # (...)
+
+    coords_raw = tf.stack([xmin, ymin, width, height], axis=-1)  # (..., 4)
 
     return coords_raw  # (..., 4) [xmin, ymin, width, height]
 

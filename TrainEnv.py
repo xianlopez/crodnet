@@ -13,7 +13,7 @@ import socket
 import os
 from L2Regularization import L2RegularizationLoss
 import math
-import MultiCellArch
+import SingleCellArch
 import re
 from LRScheduler import LRScheduler
 
@@ -45,8 +45,6 @@ class TrainEnv:
         self.input_shape = None
         self.model_variables = None
         self.reader = None
-        self.action = exec_mode  # 'train', 'evaluate'
-        self.is_training = None
         self.tensorboard_process = None
 
         self.nbatches_accum = args.nbatches_accum
@@ -60,118 +58,28 @@ class TrainEnv:
         self.generate_graph(args)
 
     # ------------------------------------------------------------------------------------------------------------------
-    def evaluate(self, args, split):
-
-        logging.info("Start evaluation")
-        with tf.Session(config=tools.get_config_proto(args.gpu_memory_fraction)) as sess:
-
-            assert type(self.saver) == tf.train.Saver, 'Saver is not correctly initialized'
-            # Initialization:
-            self.initialize(sess, args)
-            # Process all data:
-            logging.info('Computing metrics on ' + split + ' data')
-            initime = time.time()
-            sess.run(self.reader.get_init_op(split))
-            nbatches = self.reader.get_nbatches_per_epoch(split)
-            step = 0
-            all_predictions = []
-            all_labels = []
-            all_names = []
-            repetitions_metric = 0
-            detection_accuracy = 0
-            iou_mean = 0
-            while True:
-                try:
-                    net_output, labels_enc, names, images, loss = sess.run([self.predictions, self.labels, self.filenames, self.inputs, self.loss], {self.is_training: False})
-                    batch_repetitions = self.network.compute_repeated_preds_metric(net_output, labels_enc)
-                    batch_accuracy = self.network.compute_class_accuracy(net_output, labels_enc)
-                    batch_iou_mean = self.network.compute_iou_metric(net_output, labels_enc)
-                    detection_accuracy += batch_accuracy
-                    repetitions_metric += batch_repetitions
-                    if batch_iou_mean is not None:
-                        iou_mean = (iou_mean * step + batch_iou_mean) / (step + 1)
-                    predictions = self.postprocess_grid_predictions(net_output, args, self.nclasses, True)
-                    labels = self.postprocess_grid_labels(labels_enc, args)
-                    all_predictions.extend(predictions)
-                    all_labels.extend(labels)
-                    all_names.extend(names)
-
-                    if args.save_input_images:
-                        tools.save_input_images(names, images, args, 1, step, self.reader.img_extension, labels)
-                    step += 1
-
-                except tf.errors.OutOfRangeError:
-                    break
-
-                if step % args.nsteps_display == 0:
-                    print('Step %i / %i' % (step, nbatches))
-
-            mean_ap = compute_mAP(all_predictions, all_labels, self.classnames, args)
-            metrics = [detection_accuracy / step, iou_mean, mean_ap, repetitions_metric / step]
-            fintime = time.time()
-            logging.debug('Done in %.2f s' % (fintime - initime))
-            for m_idx in range(len(self.metric_names)):
-                logging.info(split + ' ' + self.metric_names[m_idx] + ': %.2f' % metrics[m_idx])
-
-            # Apply the confidence threshold to select what predictions to keep:
-            all_predictions = apply_threshold_all_images(all_predictions, args.th_conf_detection_predict)
-            mark_true_false_positives(all_predictions, all_labels, args.threshold_iou_map, all_names)
-
-            # Write results:
-            tools.write_results(all_predictions, all_labels, all_names, self.classnames, args,
-                                self.input_shape[0], self.input_shape[1], 'evaluate', self.reader.img_extension)
-
-        return metrics
-
-    # ------------------------------------------------------------------------------------------------------------------
     def evaluate_on_dataset(self, split, sess, args):
-
         logging.info('Computing loss and metrics on ' + split + ' data')
         initime = time.time()
         sess.run(self.reader.get_init_op(split))
         nbatches = self.reader.get_nbatches_per_epoch(split)
         step = 0
-        all_predictions = []
-        all_labels = []
-        all_names = []
-        loss_acum = 0
-        repetitions_metric = 0
-        detection_accuracy = 0
-        iou_mean = 0
-
+        loss_mean = 0
+        metrics_mean = np.zeros(shape=(self.network.n_metrics))
         while True:
             try:
-                predictions, labels, loss, names = sess.run(
-                    [self.predictions, self.labels, self.loss, self.filenames],
-                    {self.is_training: False})
-                batch_repetitions = self.network.compute_repeated_preds_metric(predictions, labels)
-                batch_accuracy = self.network.compute_class_accuracy(predictions, labels)
-                batch_iou_mean = self.network.compute_iou_metric(predictions, labels)
-                detection_accuracy += batch_accuracy
-                repetitions_metric += batch_repetitions
-                if batch_iou_mean is not None:
-                    iou_mean = (iou_mean * step + batch_iou_mean) / (step + 1)
-                predictions = self.postprocess_grid_predictions(predictions, args, self.nclasses, True)
-                labels = self.postprocess_grid_labels(labels, args)
-                all_predictions.extend(predictions)
-                all_labels.extend(labels)
-                all_names.extend(names)
-                loss_acum += loss
+                batch_loss, batch_metrics = sess.run([self.loss, self.metrics])
+                loss_mean = (loss_mean * step + batch_loss) / (step + 1)
+                metrics_mean = (metrics_mean * step + batch_metrics) / (step + 1)
                 step += 1
-
             except tf.errors.OutOfRangeError:
                 break
-
             if step % args.nsteps_display == 0:
-                print('Step %i / %i, loss: %.2e' % (step, nbatches, loss))
-
-        mean_ap = compute_mAP(all_predictions, all_labels, self.classnames, args)
-        metrics = [detection_accuracy / step, iou_mean, mean_ap, repetitions_metric / step]
-        loss_per_image = loss_acum / nbatches
+                print('Step %i / %i, loss: %.2e' % (step, nbatches, batch_loss))
         fintime = time.time()
         logging.debug('Done in %.2f s' % (fintime - initime))
 
-        return loss_per_image, metrics, all_predictions, all_labels, all_names
+        return loss_mean, metrics_mean
 
     # ------------------------------------------------------------------------------------------------------------------
     def train(self, args):
@@ -180,10 +88,7 @@ class TrainEnv:
         logging.info("Start training")
         nbatches_train = self.reader.get_nbatches_per_epoch('train')
         lr_scheduler = LRScheduler(args.lr_scheduler_opts, args.outdir)
-        metrics = None
         with tf.Session(config=tools.get_config_proto(args.gpu_memory_fraction)) as sess:
-
-            assert type(self.saver) == tf.train.Saver, 'Saver is not correctly initialized'
             # Initialization:
             self.initialize(sess, args)
             # Lists for the training history:
@@ -191,7 +96,7 @@ class TrainEnv:
             train_losses = []
             val_metrics = []
             val_losses = []
-            best_val_metric = 0
+            val_loss = None
             checkpoints = [] # This is a list of Checkpoint objects.
 
             # Tensorboard:
@@ -209,44 +114,25 @@ class TrainEnv:
                 learning_rate = sess.run([self.learning_rate])[0]
                 logging.info('Learning rate: ' + str(learning_rate))
                 step = 0
-                all_predictions = []
-                all_labels = []
-                loss_acum = 0
+                loss_mean = 0
+                metrics_mean = np.zeros(shape=(self.network.n_metrics))
                 iniepoch = time.time()
-                repetitions_metric = 0
-                detection_accuracy = 0
-                iou_mean = 0
-
                 while True:
                     try:
                         if self.nbatches_accum > 0:
                             if step % self.nbatches_accum == 0:
                                 sess.run(self.zero_ops)
-                            _, loss, predictions, labels, summaryOut = sess.run([self.accum_ops, self.loss, self.predictions, self.labels, merged], {self.is_training: True})
+                            _, batch_loss, batch_metrics, summaryOut = sess.run([self.accum_ops, self.loss, self.metrics, merged])
                             if (step + 1) % self.nbatches_accum == 0:
                                 _ = sess.run([self.train_step])
-
                         else:
-                            _, loss, predictions, labels, summaryOut = sess.run([self.train_op, self.loss, self.predictions, self.labels, merged], {self.is_training: True})
+                            _, batch_loss, batch_metrics, summaryOut = sess.run([self.train_op, self.loss, self.metrics, merged])
 
-                        batch_repetitions = self.network.compute_repeated_preds_metric(predictions, labels)
-                        batch_accuracy = self.network.compute_class_accuracy(predictions, labels)
-                        batch_iou_mean = self.network.compute_iou_metric(predictions, labels)
-                        detection_accuracy += batch_accuracy
-                        repetitions_metric += batch_repetitions
-                        if batch_iou_mean is not None:
-                            iou_mean = (iou_mean * step + batch_iou_mean) / (step + 1)
-
-                        if math.isnan(loss):
+                        if math.isnan(batch_loss):
                             raise Exception("Loss is Not A Number")
 
-                        if epoch % args.nepochs_checktrain == 0 and not args.recompute_train:
-                            predictions = self.postprocess_grid_predictions(predictions, args, self.nclasses, True)
-                            labels = self.postprocess_grid_labels(labels, args)
-                            all_predictions.extend(predictions)
-                            all_labels.extend(labels)
-                            loss_acum += loss
-
+                        loss_mean = (loss_mean * step + batch_loss) / (step + 1)
+                        metrics_mean = (metrics_mean * step + batch_metrics) / (step + 1)
                         step += 1
                         global_step += 1
 
@@ -259,7 +145,7 @@ class TrainEnv:
                         break
 
                     if step % args.nsteps_display == 0:
-                        logging.info('Step %i / %i, loss: %.2e' % (step, nbatches_train, loss))
+                        logging.info('Step %i / %i, loss: %.2e' % (step, nbatches_train, batch_loss))
 
                 finepoch = time.time()
                 logging.debug('Epoch computed in %.2f s' % (finepoch - iniepoch))
@@ -267,32 +153,27 @@ class TrainEnv:
                 # Compute loss and metrics on training data:
                 if epoch % args.nepochs_checktrain == 0:
                     if args.recompute_train:
-                        train_loss, metrics, _, _, _ = self.evaluate_on_dataset('train', sess, args)
-                        train_losses.append(train_loss)
-                        train_metrics.append(metrics)
-                        logging.info('Train loss: %.2e' % train_loss)
-                        for m_idx in range(len(self.metric_names)):
-                            logging.info('Train ' + self.metric_names[m_idx] + ': %.2f' % metrics[m_idx])
+                        loss_mean, metrics_mean = self.evaluate_on_dataset('train', sess, args)
+                        logging.info('Train loss: %.2e' % loss_mean)
+                        for m_idx in range(self.network.n_metrics):
+                            logging.info('Train ' + self.network.metric_names[m_idx] + ': %.2f' % train_metrics[m_idx])
                     else:
-                        train_loss = loss_acum / nbatches_train
-                        train_losses.append(train_loss)
-                        logging.info('Mean train loss during epoch: %.2e' % train_loss)
-                        mean_ap = compute_mAP(all_predictions, all_labels, self.classnames, args)
-                        metrics = [detection_accuracy / step, iou_mean, mean_ap, repetitions_metric / step]
-                        train_metrics.append(metrics)
-                        for m_idx in range(len(self.metric_names)):
-                            logging.info('Mean train ' + self.metric_names[m_idx] + ' during epoch: %.2f' % metrics[m_idx])
-                else:
-                    train_loss = None
+                        logging.info('Mean train loss during epoch: %.2e' % loss_mean)
+                        for m_idx in range(len(self.network.n_metrics)):
+                            logging.info('Mean train ' + self.network.metric_names[m_idx] + ' during epoch: %.2f' % metrics_mean[m_idx])
+                    train_losses.append(loss_mean)
+                    train_metrics.append(metrics_mean)
 
                 # Compute loss and metrics on validation data:
                 if epoch % args.nepochs_checkval == 0:
-                    val_loss, metrics, _, _, _ = self.evaluate_on_dataset('val', sess, args)
+                    val_loss, metrics = self.evaluate_on_dataset('val', sess, args)
                     val_losses.append(val_loss)
                     val_metrics.append(metrics)
                     logging.info('Val loss: %.2e' % val_loss)
-                    for m_idx in range(len(self.metric_names)):
-                        logging.info('Val ' + self.metric_names[m_idx] + ': %.2f' % metrics[m_idx])
+                    for m_idx in range(len(self.network.n_metrics)):
+                        logging.info('Val ' + self.network.metric_names[m_idx] + ': %.2f' % metrics[m_idx])
+                else:
+                    val_loss = None
 
                 # Plot training progress:
                 if epoch % args.nepochs_checktrain == 0 or epoch % args.nepochs_checkval == 0:
@@ -300,22 +181,15 @@ class TrainEnv:
 
                 # Save the model:
                 if epoch % args.nepochs_save == 0:
-                    # save_path = self.saver.save(sess, tools.join_paths(args.outdir, 'model'), global_step=epoch)
-                    # logging.info('Model saved to ' + save_path)
                     self.save_checkpoint(sess, val_loss, epoch, checkpoints, args.outdir)
 
             # Save the model (if we haven't done it yet):
             if args.num_epochs % args.nepochs_save != 0:
-                # save_path = self.saver.save(sess, tools.join_paths(args.outdir, 'model'), global_step=args.num_epochs)
-                # logging.info('Model saved to ' + save_path)
                 self.save_checkpoint(sess, val_loss, epoch, checkpoints, args.outdir)
-
-            best_val_metric = np.max(np.array(val_metrics, dtype=np.float32))
-            print('Best validation metric: ' + str(best_val_metric))
 
         self.end_tensorboard()
 
-        return best_val_metric
+        return
 
     def save_checkpoint(self, sess, validation_loss, epoch, checkpoints, outdir):
         if validation_loss is None:
@@ -371,19 +245,17 @@ class TrainEnv:
 
     # ------------------------------------------------------------------------------------------------------------------
     def generate_graph(self, args):
-        self.is_training = tf.placeholder(dtype=tf.bool, shape=(), name='is_training')
-        self.network = MultiCellArch.MultiCellArch(args.crodnet_opts, DataReader.get_n_classes(args), self.is_training, args.outdir)
+        self.network = SingleCellArch.SingleCellArch(args.single_cell_opts, DataReader.get_n_classes(args))
         self.define_inputs_and_labels(args)
-        self.predictions, self.loss = self.network.make(self.inputs, self.labels, self.filenames)
+        _, self.loss, self.metrics = self.network.make(self.inputs, self.labels, self.filenames)
         self.model_variables = [n.name for n in tf.global_variables()]
         if args.l2_regularization > 0:
             self.loss += L2RegularizationLoss(args)
         self.loss = tf.identity(self.loss, name='loss') # This is just a workaround to rename the loss function to 'loss'
         # Tensorboard:
-        tf.summary.scalar("loss_summary", self.loss)
+        tf.summary.scalar("loss", self.loss)
 
-        if self.action == 'train':
-            self.build_optimizer(args)
+        self.build_optimizer(args)
 
         self.define_initializer(args)
         self.saver = tf.train.Saver(name='net_saver')
@@ -400,10 +272,7 @@ class TrainEnv:
     # ------------------------------------------------------------------------------------------------------------------
     def define_initializer(self, args):
 
-        if args.initialization_mode == 'load-checkpoint':
-            pass
-
-        elif args.initialization_mode == 'load-pretrained':
+        if args.initialization_mode == 'load-pretrained':
 
             # self.model_variables has all the model variables (it doesn't include the optimizer variables
             # or others).
@@ -443,9 +312,7 @@ class TrainEnv:
     # ------------------------------------------------------------------------------------------------------------------
     def initialize(self, sess, args):
 
-        if args.initialization_mode == 'load-checkpoint':
-            self.saver.restore(sess, tools.get_checkpoint(args))
-        elif args.initialization_mode == 'load-pretrained':
+        if args.initialization_mode == 'load-pretrained':
             self.restore_fn(sess)
             sess.run(self.init_op)
         elif args.initialization_mode == 'scratch':
@@ -535,88 +402,3 @@ class TrainEnv:
         hostname = socket.gethostname()
         tensorboard_url = 'http://' + hostname + ':6006'
         return merged, summary_writer, tensorboard_url
-
-
-    # ----------------------------------------------------------------------------------------------------------------------
-    def postprocess_grid_labels(self, encoded_labels, args):
-        gtboxes_batched = []
-        for b in range(args.batch_size):
-            gtboxes_batched.append(self.network.decode_gt(encoded_labels[b, :, :]))
-
-        return gtboxes_batched
-
-
-    # ----------------------------------------------------------------------------------------------------------------------
-    def postprocess_grid_predictions(self, predictions, args, nclasses, evaluation_mode):
-        if evaluation_mode:
-            th_conf = args.th_conf_detection_evaluate
-        else:
-            th_conf = args.th_conf_detection_predict
-        bndboxes_batched = []
-        for i in range(args.batch_size):
-            bndboxes_no_suppresion = self.network.decode_preds(predictions[i, ...], th_conf)
-            if args.nonmaxsup:
-                bndboxes = []
-                for cl in range(nclasses):
-                    boxes_this_class = [x for x in bndboxes_no_suppresion if x.classid == cl]
-                    pred_list = tools.non_maximum_suppression(boxes_this_class, args.threshold_nms)
-                    bndboxes.extend(pred_list)
-            else:
-                bndboxes = bndboxes_no_suppresion
-
-            bndboxes_batched.append(bndboxes)
-
-        return bndboxes_batched
-
-
-# ----------------------------------------------------------------------------------------------------------------------
-def apply_threshold_all_images(predictions, threshold):
-
-    nimages = len(predictions)
-    remaining_preds = []
-
-    for i in range(nimages):
-        remaining_preds.append(apply_threshold(predictions[i], threshold))
-
-    return remaining_preds
-
-
-# ----------------------------------------------------------------------------------------------------------------------
-def apply_threshold(pred_list, threshold):
-
-    remaining_boxes = []
-
-    for i in range(len(pred_list)):
-        if pred_list[i].confidence >= threshold:
-            remaining_boxes.append(pred_list[i])
-
-    return remaining_boxes
-
-
-# ----------------------------------------------------------------------------------------------------------------------
-def mark_true_false_positives(predictions, labels, threshold_iou, names):
-    nimages = len(predictions)
-    for i in range(nimages):
-        gt_used = []
-        predictions[i].sort(key=operator.attrgetter('confidence'), reverse=True)
-        for idx_pred in range(len(predictions[i])):
-            predictions[i][idx_pred].set_tp(False)
-            iou_vec = np.zeros(len(labels[i]))
-            class_ids = np.zeros(len(labels[i]), dtype=np.int32)
-            for idx_lab in range(len(labels[i])):
-                iou_vec[idx_lab] = tools.compute_iou(predictions[i][idx_pred].get_coords(), labels[i][idx_lab].get_coords())
-                class_ids[idx_lab] = labels[i][idx_lab].classid
-            ord_idx = np.argsort(-1 * iou_vec)
-            iou_vec = iou_vec[ord_idx]
-            class_ids = class_ids[ord_idx]
-            for j in range(len(iou_vec)):
-                if iou_vec[j] >= threshold_iou:
-                    if predictions[i][idx_pred].classid == class_ids[j]:
-                        if ord_idx[j] not in gt_used:
-                            predictions[i][idx_pred].set_tp(True)
-                            # predictions[i][idx_pred].tp = 'yes'
-                            gt_used.append(ord_idx[j])
-                            break
-                else:
-                    break
-    return predictions
