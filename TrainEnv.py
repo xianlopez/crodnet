@@ -27,7 +27,9 @@ class Checkpoint:
 class TrainEnv:
 
     # ------------------------------------------------------------------------------------------------------------------
-    def __init__(self, args, exec_mode):
+    def __init__(self, opts):
+
+        self.opts = opts
 
         self.loss = None
         self.optimizer = None
@@ -46,7 +48,7 @@ class TrainEnv:
         self.reader = None
         self.tensorboard_process = None
 
-        self.nbatches_accum = args.nbatches_accum
+        self.nbatches_accum = self.opts.nbatches_accum
         self.zero_ops = None
         self.accum_ops = None
         self.train_step = None
@@ -54,10 +56,10 @@ class TrainEnv:
         self.metric_names = ['class_accuracy', 'iou_mean', 'mean_ap', 'repetitions']
 
         # Initialize network:
-        self.generate_graph(args)
+        self.generate_graph()
 
     # ------------------------------------------------------------------------------------------------------------------
-    def evaluate_on_dataset(self, split, sess, args):
+    def evaluate_on_dataset(self, split, sess):
         logging.info('Computing loss and metrics on ' + split + ' data')
         initime = time.time()
         sess.run(self.reader.get_init_op(split))
@@ -73,7 +75,7 @@ class TrainEnv:
                 step += 1
             except tf.errors.OutOfRangeError:
                 break
-            if step % args.nsteps_display == 0:
+            if step % self.opts.nsteps_display == 0:
                 print('Step %i / %i, loss: %.2e' % (step, nbatches, batch_loss))
         fintime = time.time()
         logging.debug('Done in %.2f s' % (fintime - initime))
@@ -81,15 +83,15 @@ class TrainEnv:
         return loss_mean, metrics_mean
 
     # ------------------------------------------------------------------------------------------------------------------
-    def train(self, args):
+    def train(self):
 
         print('')
         logging.info("Start training")
         nbatches_train = self.reader.get_nbatches_per_epoch('train')
-        lr_scheduler = LRScheduler(args.lr_scheduler_opts, args.outdir)
-        with tf.Session(config=tools.get_config_proto(args.gpu_memory_fraction)) as sess:
+        lr_scheduler = LRScheduler(self.opts.lr_scheduler_opts, self.opts.outdir)
+        with tf.Session(config=tools.get_config_proto(self.opts.gpu_memory_fraction)) as sess:
             # Initialization:
-            self.initialize(sess, args)
+            self.initialize(sess)
             # Lists for the training history:
             train_metrics = []
             train_losses = []
@@ -99,14 +101,14 @@ class TrainEnv:
             checkpoints = [] # This is a list of Checkpoint objects.
 
             # Tensorboard:
-            merged, summary_writer, tensorboard_url = self.prepare_tensorboard(sess, args)
+            merged, summary_writer, tensorboard_url = self.prepare_tensorboard(sess)
 
             # Loop on epochs:
-            current_lr = args.learning_rate
+            current_lr = self.opts.learning_rate
             global_step = 0
-            for epoch in range(1, args.num_epochs + 1):
+            for epoch in range(1, self.opts.num_epochs + 1):
                 print('')
-                logging.info('Starting epoch %d / %d' % (epoch, args.num_epochs))
+                logging.info('Starting epoch %d / %d' % (epoch, self.opts.num_epochs))
                 sess.run(self.reader.get_init_op('train'))
                 current_lr = lr_scheduler.GetLearningRateAtEpoch(epoch, current_lr)
                 _ = sess.run([self.update_lr_op], feed_dict={self.lr_to_update: current_lr})
@@ -143,16 +145,16 @@ class TrainEnv:
                     except tf.errors.OutOfRangeError:
                         break
 
-                    if step % args.nsteps_display == 0:
+                    if step % self.opts.nsteps_display == 0:
                         logging.info('Step %i / %i, loss: %.2e' % (step, nbatches_train, batch_loss))
 
                 finepoch = time.time()
                 logging.debug('Epoch computed in %.2f s' % (finepoch - iniepoch))
 
                 # Compute loss and metrics on training data:
-                if epoch % args.nepochs_checktrain == 0:
-                    if args.recompute_train:
-                        loss_mean, metrics_mean = self.evaluate_on_dataset('train', sess, args)
+                if epoch % self.opts.nepochs_checktrain == 0:
+                    if self.opts.recompute_train:
+                        loss_mean, metrics_mean = self.evaluate_on_dataset('train', sess)
                         logging.info('Train loss: %.2e' % loss_mean)
                         for m_idx in range(self.single_cell_arch.n_metrics):
                             logging.info('Train ' + self.single_cell_arch.metric_names[m_idx] + ': %.2f' % train_metrics[m_idx])
@@ -164,8 +166,8 @@ class TrainEnv:
                     train_metrics.append(metrics_mean)
 
                 # Compute loss and metrics on validation data:
-                if epoch % args.nepochs_checkval == 0:
-                    val_loss, metrics = self.evaluate_on_dataset('val', sess, args)
+                if epoch % self.opts.nepochs_checkval == 0:
+                    val_loss, metrics = self.evaluate_on_dataset('val', sess)
                     val_losses.append(val_loss)
                     val_metrics.append(metrics)
                     logging.info('Val loss: %.2e' % val_loss)
@@ -175,16 +177,16 @@ class TrainEnv:
                     val_loss = None
 
                 # Plot training progress:
-                if epoch % args.nepochs_checktrain == 0 or epoch % args.nepochs_checkval == 0:
-                    tools.plot_training_history(train_metrics, train_losses, val_metrics, val_losses, self.metric_names, args, epoch)
+                if epoch % self.opts.nepochs_checktrain == 0 or epoch % self.opts.nepochs_checkval == 0:
+                    tools.plot_training_history(train_metrics, train_losses, val_metrics, val_losses, self.metric_names, self.opts, epoch)
 
                 # Save the model:
-                if epoch % args.nepochs_save == 0:
-                    self.save_checkpoint(sess, val_loss, epoch, checkpoints, args.outdir)
+                if epoch % self.opts.nepochs_save == 0:
+                    self.save_checkpoint(sess, val_loss, epoch, checkpoints, self.opts.outdir)
 
             # Save the model (if we haven't done it yet):
-            if args.num_epochs % args.nepochs_save != 0:
-                self.save_checkpoint(sess, val_loss, epoch, checkpoints, args.outdir)
+            if self.opts.num_epochs % self.opts.nepochs_save != 0:
+                self.save_checkpoint(sess, val_loss, epoch, checkpoints, self.opts.outdir)
 
         self.end_tensorboard()
 
@@ -243,51 +245,51 @@ class TrainEnv:
         return checkpoints
 
     # ------------------------------------------------------------------------------------------------------------------
-    def generate_graph(self, args):
-        self.single_cell_arch = SingleCellArch.SingleCellArch(args.single_cell_opts, TrainDataReader.get_n_classes(args))
-        self.define_inputs_and_labels(args)
+    def generate_graph(self):
+        self.single_cell_arch = SingleCellArch.SingleCellArch(self.opts.single_cell_opts, TrainDataReader.get_n_classes(self.opts))
+        self.define_inputs_and_labels()
         _, self.loss, self.metrics = self.single_cell_arch.make(self.inputs, self.labels, self.filenames)
         self.model_variables = [n.name for n in tf.global_variables()]
-        if args.l2_regularization > 0:
-            self.loss += L2RegularizationLoss(args)
+        if self.opts.l2_regularization > 0:
+            self.loss += L2RegularizationLoss(self.opts)
         self.loss = tf.identity(self.loss, name='loss') # This is just a workaround to rename the loss function to 'loss'
         # Tensorboard:
         tf.summary.scalar("loss", self.loss)
 
-        self.build_optimizer(args)
+        self.build_optimizer()
 
-        self.define_initializer(args)
+        self.define_initializer()
         self.saver = tf.train.Saver(name='net_saver')
 
     # ------------------------------------------------------------------------------------------------------------------
-    def define_inputs_and_labels(self, args):
+    def define_inputs_and_labels(self):
         self.input_shape = self.single_cell_arch.get_input_shape()
         with tf.device('/cpu:0'):
-            self.reader = TrainDataReader.TrainDataReader(self.input_shape, args, self.single_cell_arch, self.opts.image_cropper_opts)
+            self.reader = TrainDataReader.TrainDataReader(self.input_shape, self.opts, self.single_cell_arch)
             self.inputs, self.labels, self.filenames = self.reader.build_iterator()
         self.classnames = self.reader.classnames
         self.nclasses = len(self.classnames)
 
     # ------------------------------------------------------------------------------------------------------------------
-    def define_initializer(self, args):
+    def define_initializer(self):
 
-        if args.initialization_mode == 'load-pretrained':
+        if self.opts.initialization_mode == 'load-pretrained':
 
             # self.model_variables has all the model variables (it doesn't include the optimizer variables
             # or others).
-            # We will filter out from it the variables that fit in the scopes specified in args.modified_scopes.
+            # We will filter out from it the variables that fit in the scopes specified in opts.modified_scopes.
             # Usually this is necessary in the last layer, if the number of outputs is different.
-            assert type(args.modified_scopes) == list, 'modified_scopes should be a list.'
+            assert type(self.opts.modified_scopes) == list, 'modified_scopes should be a list.'
             varnames_to_restore = []
 
             print('')
             logging.debug('Variables to restore:')
             candidate_vars_to_restore = self.model_variables
-            if args.restore_optimizer:
+            if self.opts.restore_optimizer:
                 candidate_vars_to_restore.extend([var.name for var in self.optimizer_variables])
             for var in candidate_vars_to_restore:
                 is_modified = False
-                for modscope in args.modified_scopes:
+                for modscope in self.opts.modified_scopes:
                     if modscope in var:
                         is_modified = True
                 if not is_modified:
@@ -296,34 +298,34 @@ class TrainEnv:
 
             # Get the variables to restore:
             vars_to_restore = tf.contrib.framework.get_variables_to_restore(include=varnames_to_restore)
-            self.restore_fn = tf.contrib.framework.assign_from_checkpoint_fn(args.weights_file, vars_to_restore)
+            self.restore_fn = tf.contrib.framework.assign_from_checkpoint_fn(self.opts.weights_file, vars_to_restore)
 
             # Variables to initialize from scratch (the rest):
             vars_new = tf.contrib.framework.get_variables_to_restore(exclude=varnames_to_restore)
             self.init_op = tf.variables_initializer(vars_new, name='scratch_vars_init')
 
-        elif args.initialization_mode == 'scratch':
+        elif self.opts.initialization_mode == 'scratch':
             self.init_op = tf.global_variables_initializer()
 
         else:
             raise Exception('Initialization mode not recognized.')
 
     # ------------------------------------------------------------------------------------------------------------------
-    def initialize(self, sess, args):
+    def initialize(self, sess):
 
-        if args.initialization_mode == 'load-pretrained':
+        if self.opts.initialization_mode == 'load-pretrained':
             self.restore_fn(sess)
             sess.run(self.init_op)
-        elif args.initialization_mode == 'scratch':
+        elif self.opts.initialization_mode == 'scratch':
             sess.run(self.init_op)
         else:
             raise Exception('Initialization mode not recognized.')
 
     # ------------------------------------------------------------------------------------------------------------------
-    def build_optimizer(self, args):
+    def build_optimizer(self):
 
         # Choose the variables to train:
-        vars_to_train = tools.get_trainable_variables(args)
+        vars_to_train = tools.get_trainable_variables(self.opts)
 
         print('')
         logging.debug('Training variables:')
@@ -332,29 +334,29 @@ class TrainEnv:
             logging.debug(v.name)
 
         # if self.nbatches_accum > 0:
-        #     args.learning_rate = args.learning_rate / self.nbatches_accum
+        #     opts.learning_rate = opts.learning_rate / self.nbatches_accum
 
-        self.learning_rate = tf.Variable(initial_value=args.learning_rate, dtype=tf.float32, name='learning_rate')
+        self.learning_rate = tf.Variable(initial_value=self.opts.learning_rate, dtype=tf.float32, name='learning_rate')
         self.lr_to_update = tf.placeholder(dtype=tf.float32, shape=(), name='lr_to_update')
         self.update_lr_op = tf.assign(self.learning_rate, self.lr_to_update, name='UpdateLR')
 
         previous_variables = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)
 
         # Decide what optimizer to use:
-        if args.optimizer_name == 'sgd':
+        if self.opts.optimizer_name == 'sgd':
             optimizer = tf.train.GradientDescentOptimizer(self.learning_rate)
-        elif args.optimizer_name == 'adam':
+        elif self.opts.optimizer_name == 'adam':
             optimizer = tf.train.AdamOptimizer(self.learning_rate)
-        elif args.optimizer_name == 'rmsprop':
+        elif self.opts.optimizer_name == 'rmsprop':
             optimizer = tf.train.RMSPropOptimizer(self.learning_rate)
-        elif args.optimizer_name == 'momentum':
-            optimizer = tf.train.MomentumOptimizer(self.learning_rate, args.momentum)
+        elif self.opts.optimizer_name == 'momentum':
+            optimizer = tf.train.MomentumOptimizer(self.learning_rate, self.opts.momentum)
         else:
             raise Exception('Optimizer name not recognized.')
 
         if self.nbatches_accum > 0:
             with tf.name_scope('n_batches_accum'):
-                # assert args.optimizer_name == 'sgd', 'If nbatches_accum > 0, the optimizer must be SGD'
+                # assert opts.optimizer_name == 'sgd', 'If nbatches_accum > 0, the optimizer must be SGD'
                 accum_grads = [tf.Variable(tf.zeros_like(tv.initialized_value(), name='zeros_tv'), trainable=False, name='accum_grads') for tv in vars_to_train]
                 self.zero_ops = [ag.assign(tf.zeros_like(ag, name='zeros_ag'), name='zero_ops_assign') for ag in accum_grads]
                 gvs = optimizer.compute_gradients(self.loss, vars_to_train)
@@ -385,16 +387,15 @@ class TrainEnv:
 
 
     # ----------------------------------------------------------------------------------------------------------------------
-    def prepare_tensorboard(self, sess, args):
+    def prepare_tensorboard(self, sess):
         merged = tf.summary.merge_all(name='summary_merge_all')
-        summary_writer = tf.summary.FileWriter(os.path.join(args.outdir, 'tensorboard'), sess.graph)
+        summary_writer = tf.summary.FileWriter(os.path.join(self.opts.outdir, 'tensorboard'), sess.graph)
         if os.name == 'nt':  # Windows
-            # command = r'C:\Davantis\Development\VENVS\BrainLab\Scripts\tensorboard --logdir=' + os.path.join(args.outdir, 'tensorboard')
-            command = r'C:\development\venvs\brainlab_tf11\Scripts\tensorboard --logdir=' + os.path.join(args.outdir, 'tensorboard')
+            command = r'C:\development\venvs\brainlab_tf11\Scripts\tensorboard --logdir=' + os.path.join(self.opts.outdir, 'tensorboard')
             self.tensorboard_process = subprocess.Popen(["start", "cmd", "/k", command], shell=True)
         elif os.name == 'posix':  # Ubuntu
-            #command = 'python /home/xian/venvs/brainlab/lib/python3.5/site-packages/tensorboard/main.py --logdir=' + os.path.join(args.outdir, 'tensorboard')
-            command = 'python /home/xian/venvs/brainlab_tf11/lib/python3.5/site-packages/tensorboard/main.py --logdir=' + os.path.join(args.outdir, 'tensorboard')
+            command = 'python /home/xian/venvs/brainlab_tf11/lib/python3.5/site-packages/tensorboard/main.py --logdir=' + \
+                      os.path.join(self.opts.outdir, 'tensorboard')
             self.tensorboard_process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
         else:
             raise Exception('Operative system name not recognized: ' + str(os.name))

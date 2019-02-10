@@ -22,35 +22,35 @@ def get_n_classes(args):
 # ======================================================================================================================
 class TrainDataReader:
     # ------------------------------------------------------------------------------------------------------------------
-    def __init__(self, input_shape, args, single_cell_arch, image_cropper_opts):
+    def __init__(self, input_shape, opts, single_cell_arch):
 
         self.single_cell_arch = single_cell_arch
-        self.n_images_per_batch = args.n_images_per_batch
+        self.n_images_per_batch = opts.n_images_per_batch
         self.input_width = input_shape[0]
         self.input_height = input_shape[1]
-        self.num_workers = args.num_workers
-        self.buffer_size = args.buffer_size
+        self.num_workers = opts.num_workers
+        self.buffer_size = opts.buffer_size
         self.preprocessor = Preprocessor.Preprocessor(self.input_width, self.input_height)
 
         self.resize_function = Resizer.ResizerWithLabels(self.input_width, self.input_height).get_resize_func(
-            args.resize_method)
+            opts.resize_method)
 
-        self.percent_of_data = args.percent_of_data
-        self.max_image_size = args.max_image_size
+        self.percent_of_data = opts.percent_of_data
+        self.max_image_size = opts.max_image_size
         self.nimages_train = None
         self.nimages_val = None
         self.train_init_op = None
         self.val_init_op = None
-        self.dirdata = os.path.join(args.root_of_datasets, args.dataset_name)
+        self.dirdata = os.path.join(opts.root_of_datasets, opts.dataset_name)
         self.img_extension, self.classnames = tools.process_dataset_config(
             os.path.join(self.dirdata, 'dataset_info.xml'))
         self.img_extension = '.' + self.img_extension
-        self.outdir = args.outdir
-        self.write_network_input = args.write_network_input
+        self.outdir = opts.outdir
+        self.write_network_input = opts.write_network_input
 
-        self.shuffle_data = args.shuffle_data
+        self.shuffle_data = opts.shuffle_data
 
-        self.image_cropper = ImageCropper.ImageCropper(image_cropper_opts, self.single_cell_arch)
+        self.image_cropper = ImageCropper.ImageCropper(opts.image_cropper_opts, self.single_cell_arch)
 
         if self.img_extension == '.jpg' or self.img_extension == '.JPEG':
             self.parse_function = parse_jpg
