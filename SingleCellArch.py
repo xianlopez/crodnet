@@ -6,6 +6,7 @@ import CommonEncoding
 import tools
 from BoundingBoxes import BoundingBox, PredictedBox
 import cv2
+import sys
 
 
 class SingleCellArch:
@@ -260,7 +261,7 @@ class SingleCellArch:
             # Put all together in one array:
             labels_enc = np.stack([any_match.astype(np.float32),
                                    is_neutral.astype(np.float32),
-                                   class_id.astype(np.float32),
+                                   float(class_id),
                                    nearest_valid_gt_idx.astype(np.float32),
                                    pc_associated])
             labels_enc = np.concatenate([coordinates_enc, labels_enc])  # (9)
@@ -341,26 +342,38 @@ class SingleCellArch:
         mask_match = CommonEncoding.get_mask_match(labels_enc_reord) > 0.5  # (batch_size)
         mask_neutral = CommonEncoding.get_mask_neutral(labels_enc_reord) > 0.5  # (batch_size)
         for i in range(batch_size):
-            name = filenames_reord[i]
-            crop = inputs_reord[i, ...]  # (input_image_size, input_image_size, 3)
-            label_enc = labels_enc_reord[i, :]
-            gt_class = CommonEncoding.get_gt_class(label_enc)
-            gt_coords = CommonEncoding.get_gt_coords(label_enc)
-            is_match = mask_match[i]
-            is_neutral = mask_neutral[i]
-            if is_neutral:
-                crop_path = os.path.join(batch_dir, name + '_neutral.png')
-            else:
-                crop_path = os.path.join(batch_dir, name + '.png')
-                if gt_class != self.background_id:
-                    crop = tools.add_bounding_boxes_to_image(crop, [[gt_class].extend(gt_coords)], color=(255, 0, 0))
-                else:
-                    assert not is_match, 'is_match is True, and gt_class it background_id.'
+            name = filenames_reord[i].decode(sys.getdefaultencoding())
+            try:
+                crop = inputs_reord[i, ...]  # (input_image_size, input_image_size, 3)
+                crop = add_mean_again(crop)
+                label_enc = labels_enc_reord[i, :]
+                gt_class = CommonEncoding.get_gt_class(label_enc)
+                gt_coords_enc = CommonEncoding.get_gt_coords(label_enc)
+                gt_coords_dec = decode_boxes_np(gt_coords_enc, self.opts)
+                is_match = mask_match[i]
+                is_neutral = mask_neutral[i]
                 predicted_class = np.argmax(loc_and_classif[i, 4:])
-                predicted_coords = loc_and_classif[i, :4]
-                if predicted_class != self.background_id:
-                    crop = tools.add_bounding_boxes_to_image(crop, [[predicted_class].extend(predicted_coords)], color=(127, 0, 127))
-            cv2.imwrite(crop_path, crop)
+                if is_neutral:
+                    crop_path = os.path.join(batch_dir, name + '_crop' + str(i) + '_neutral_PRED-' + str(predicted_class) + '.png')
+                else:
+                    crop_path = os.path.join(batch_dir, name + '_crop' + str(i) + '_PRED-' + str(predicted_class) + '.png')
+                    if gt_class != self.background_id:
+                        class_and_coords = np.concatenate([np.expand_dims(gt_class, axis=0), gt_coords_dec], axis=0)  # (5)
+                        class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
+                        crop = tools.add_bounding_boxes_to_image(crop, class_and_coords, color=(255, 0, 0))
+                    else:
+                        assert not is_match, 'is_match is True, and gt_class it background_id.'
+                    predicted_coords_enc = loc_and_classif[i, :4]
+                    predicted_coords_dec = decode_boxes_np(predicted_coords_enc, self.opts)
+                    if predicted_class != self.background_id:
+                        class_and_coords = np.concatenate([np.expand_dims(predicted_class, axis=0), predicted_coords_dec], axis=0)  # (5)
+                        class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
+                        crop = tools.add_bounding_boxes_to_image(crop, class_and_coords, color=(127, 0, 127))
+                cv2.imwrite(crop_path, cv2.cvtColor(crop.astype(np.uint8), cv2.COLOR_RGB2BGR))
+
+            except:
+                print('Error with image ' + name)
+                raise
 
         # Comparisons:
         total_comparisons = (self.opts.n_comparisons_inter + self.opts.n_comparisons_intra) * self.opts.n_images_per_batch
@@ -371,32 +384,58 @@ class SingleCellArch:
         for i in range(total_comparisons):
             idx1 = comparisons_indices[i, 0]
             idx2 = comparisons_indices[i, 1]
-            name1 = filenames[idx1]
-            name2 = filenames[idx2]
-            crop1 = inputs_reord[idx1, ...]  # (input_image_size, input_image_size, 3)
-            crop2 = inputs_reord[idx1, ...]  # (input_image_size, input_image_size, 3)
-            any_neutral = mask_neutral[idx1] or mask_neutral[idx2]
-            any_match = mask_match[idx1] or mask_match[idx2]
-            if any_neutral:
-                gt_comp = 'neutral'
-            elif not any_match:
-                gt_comp = 'nomatches'
-            elif comparisons_labels[i] > 0.5:
-                gt_comp = 'same'
-            else:
-                gt_comp = 'diff'
-            if comparisons_pred[i, 1] > comparisons_pred[i, 0]:
-                pred_comp = 'same'
-            else:
-                pred_comp = 'diff'
-            mosaic_name = 'comp' + str(i) + '_' + name1 + ' - ' + name2 + '_GT:' + gt_comp + '_PRED:' + pred_comp + '.png'
-            if name1 == name2:  # Intra-comparison:
-                mosaic_path = os.path.join(intra_dir, mosaic_name)
-            else:  # Inter-comparison
-                mosaic_path = os.path.join(inter_dir, mosaic_name)
-            separator = np.zeros(shape=(network.receptive_field_size, 10, 3), dtype=np.float32)
-            mosaic = np.concatenate([crop1, separator, crop2], axis=0)  # (2*input_image_size+10, input_image_size, 3)
-            cv2.imwrite(mosaic_path, mosaic)
+            name1 = filenames_reord[idx1].decode(sys.getdefaultencoding())
+            name2 = filenames_reord[idx2].decode(sys.getdefaultencoding())
+            try:
+                crop1 = inputs_reord[idx1, ...]  # (input_image_size, input_image_size, 3)
+                crop2 = inputs_reord[idx2, ...]  # (input_image_size, input_image_size, 3)
+                crop1 = add_mean_again(crop1)
+                crop2 = add_mean_again(crop2)
+                any_neutral = mask_neutral[idx1] or mask_neutral[idx2]
+                any_match = mask_match[idx1] or mask_match[idx2]
+                # Box of crop 1:
+                label_enc_1 = labels_enc_reord[idx1, :]
+                gt_class_1 = CommonEncoding.get_gt_class(label_enc_1)
+                gt_coords_enc_1 = CommonEncoding.get_gt_coords(label_enc_1)
+                gt_coords_dec_1 = decode_boxes_np(gt_coords_enc_1, self.opts)
+                if gt_class_1 != self.background_id:
+                    class_and_coords = np.concatenate([np.expand_dims(gt_class_1, axis=0), gt_coords_dec_1], axis=0)  # (5)
+                    class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
+                    crop1 = tools.add_bounding_boxes_to_image(crop1, class_and_coords, color=(255, 0, 0))
+                # Box of crop 2:
+                label_enc_2 = labels_enc_reord[idx2, :]
+                gt_class_2 = CommonEncoding.get_gt_class(label_enc_2)
+                gt_coords_enc_2 = CommonEncoding.get_gt_coords(label_enc_2)
+                gt_coords_dec_2 = decode_boxes_np(gt_coords_enc_2, self.opts)
+                if gt_class_2 != self.background_id:
+                    class_and_coords = np.concatenate([np.expand_dims(gt_class_2, axis=0), gt_coords_dec_2], axis=0)  # (5)
+                    class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
+                    crop2 = tools.add_bounding_boxes_to_image(crop2, class_and_coords, color=(255, 0, 0))
+                # Label and prediction:
+                if any_neutral:
+                    gt_comp = 'neutral'
+                elif not any_match:
+                    gt_comp = 'nomatches'
+                elif comparisons_labels[i] > 0.5:
+                    gt_comp = 'same'
+                else:
+                    gt_comp = 'diff'
+                if comparisons_pred[i, 1] > comparisons_pred[i, 0]:
+                    pred_comp = 'same'
+                else:
+                    pred_comp = 'diff'
+                mosaic_name = 'comp' + str(i) + '_' + name1 + ' - ' + name2 + '_GT-' + gt_comp + '_PRED-' + pred_comp + '.png'
+                if name1 == name2:  # Intra-comparison:
+                    mosaic_path = os.path.join(intra_dir, mosaic_name)
+                else:  # Inter-comparison
+                    mosaic_path = os.path.join(inter_dir, mosaic_name)
+                separator = np.zeros(shape=(network.receptive_field_size, 10, 3), dtype=np.float32)
+                mosaic = np.concatenate([crop1, separator, crop2], axis=1)  # (2*input_image_size+10, input_image_size, 3)
+                cv2.imwrite(mosaic_path, cv2.cvtColor(mosaic.astype(np.uint8), cv2.COLOR_RGB2BGR))
+
+            except:
+                print('Error with pair ' + name1 + ' - ' + name2)
+                raise
 
         return metrics
 
@@ -647,4 +686,11 @@ def decode_boxes_tf(coords_enc, opts):
     coords_raw = tf.stack([xmin, ymin, width, height], axis=-1)  # (..., 4)
 
     return coords_raw  # (..., 4) [xmin, ymin, width, height]
+
+
+def add_mean_again(image):
+    mean = [123.0, 117.0, 104.0]
+    mean = np.reshape(mean, [1, 1, 3])
+    image = image + mean
+    return image
 

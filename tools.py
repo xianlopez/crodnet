@@ -316,11 +316,11 @@ def add_bounding_boxes_to_image(image, bboxes, color=(0,0,255), line_width=2):
     # bboxes: (nboxes, 5) [class_id, xmin, ymin, width, height] in relative coordinates
     height = image.shape[0]
     width = image.shape[1]
-    for box in bboxes:
-        xmin = int(np.round(box[1] * width))
-        ymin = int(np.round(box[2] * height))
-        w = int(np.round(box[3] * width))
-        h = int(np.round(box[4] * height))
+    for i in range(bboxes.shape[0]):
+        xmin = int(np.round(bboxes[i, 1] * width))
+        ymin = int(np.round(bboxes[i, 2] * height))
+        w = int(np.round(bboxes[i, 3] * width))
+        h = int(np.round(bboxes[i, 4] * height))
         cv2.rectangle(image, (xmin, ymin), (xmin + w, ymin + h), color, line_width)
     return image
 

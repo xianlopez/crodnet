@@ -6,8 +6,8 @@ import network
 class ImageCropperOptions:
     def __init__(self):
         self.padding_factor = 0.5
-        self.min_side_scale = 0.2
-        self.max_side_scale = 0.9
+        self.min_side_scale = 0.1
+        self.max_side_scale = 0.8
 
 
 class ImageCropper:
@@ -17,56 +17,95 @@ class ImageCropper:
         self.n_crops_per_image = n_crops_per_image
 
     def take_crops_on_image(self, image, bboxes):
-        orig_height, orig_width, _ = image.shape
-        padded_image, padded_height, padded_width = self.pad_image(image, orig_height, orig_width)
+        # Pad the image to make it square:
+        image, bboxes = pad_to_make_square(image, bboxes)
+        # Add a black frame around the image, to allow crops to lie partially outside the image:
+        padded_image, bboxes, padded_side = self.pad_image(image, bboxes)
+        # Make crops:
         crops = np.zeros(shape=(self.n_crops_per_image, network.receptive_field_size, network.receptive_field_size, 3), dtype=np.float32)
         labels_enc = np.zeros(shape=(self.n_crops_per_image, self.single_cell_arch.n_labels), dtype=np.float32)
         for i in range(self.n_crops_per_image):
-            this_crop, this_label_enc = self.make_crop_keep_one_box_and_resize(padded_image, bboxes, padded_width, padded_height)
+            this_crop, this_label_enc = self.make_crop_keep_one_box_and_resize(padded_image, bboxes, padded_side)
             crops[i, :, :, :] = this_crop
             labels_enc[i, :] = this_label_enc
         return crops, labels_enc
 
-    def pad_image(self, image, orig_height, orig_width):
-        padded_height = orig_height * (1 + 2 * self.opts.padding_factor)
-        padded_width = orig_width * (1 + 2 * self.opts.padding_factor)
-        increment_top = int(np.round((padded_height - orig_height) / 2))
-        increment_bottom = int(padded_height - orig_height - increment_top)
-        increment_left = int(np.round((padded_width - orig_width) / 2))
-        increment_right = int(padded_width - orig_width - increment_left)
+    def pad_image(self, image, bboxes):
+        # image: (sq_side, sq_side, 3)
+        sq_side, width, _ = image.shape
+        assert sq_side == width, 'Image is not square in pad_image.'
+        padded_side = sq_side * (1 + 2 * self.opts.padding_factor)
+        increment_top = int(np.round((padded_side - sq_side) / 2))
+        increment_bottom = int(padded_side - sq_side - increment_top)
+        increment_left = int(np.round((padded_side - sq_side) / 2))
+        increment_right = int(padded_side - sq_side - increment_left)
         padded_image = cv2.copyMakeBorder(image, increment_top, increment_bottom, increment_left, increment_right, cv2.BORDER_CONSTANT)
-        return padded_image, padded_height, padded_width
+        # Warp and shift boxes:
+        rel_incr_left = float(increment_left) / sq_side
+        rel_incr_right = float(increment_right) / sq_side
+        rel_incr_top = float(increment_top) / sq_side
+        rel_incr_bottom = float(increment_bottom) / sq_side
+        bboxes[:, 1] = (bboxes[:, 1] + rel_incr_left) / (1.0 + rel_incr_left + rel_incr_right)
+        bboxes[:, 2] = (bboxes[:, 2] + rel_incr_top) / (1.0 + rel_incr_top + rel_incr_bottom)
+        bboxes[:, 3] = bboxes[:, 3] / (1.0 + rel_incr_left + rel_incr_right)
+        bboxes[:, 4] = bboxes[:, 4] / (1.0 + rel_incr_top + rel_incr_bottom)
+        return padded_image, bboxes, padded_side
 
-    def make_crop_keep_one_box_and_resize(self, image, bboxes, img_width, img_height):
-        # image: (height, width, 3)
+    def make_crop_keep_one_box_and_resize(self, image, bboxes, img_side):
+        # image: (img_side, img_side, 3)
         # bboxes: (n_gt, 6) [class_id, xmin, ymin, width, height, percent_contained]
         # Take a random crop:
-        patch, remaining_boxes = sample_random_patch(image, bboxes, img_width, img_height, self.opts.min_side_scale, self.opts.max_side_scale)
+        patch, remaining_boxes = sample_random_patch(image, bboxes, img_side, self.opts.min_side_scale, self.opts.max_side_scale)
         # Encode the labels (and keep only one box):
-        label_enc = self.single_cell_arch.encode_gt_from_array(bboxes)  # (9)
+        label_enc = self.single_cell_arch.encode_gt_from_array(remaining_boxes)  # (9)
         # Resize the crop to the size expected by the network:
         crop = cv2.resize(patch, (network.receptive_field_size, network.receptive_field_size), interpolation=1)  # (receptive_field_size, receptive_field_size, 3)
         return crop, label_enc
 
 
-def sample_random_patch(image, bboxes, img_width, img_height, min_scale, max_scale):
-    # image: (height, width, 3)
+def pad_to_make_square(image, bboxes):
+    # image: (orig_height, orig_width, 3)
     # bboxes: (n_gt, 6) [class_id, xmin, ymin, width, height, percent_contained]
-    patch_x0_rel, patch_y0_rel, patch_width_rel, patch_height_rel = make_patch_shape(img_width, img_height, min_scale, max_scale)
-    patch, remaining_boxes = sample_patch(image, bboxes, img_width, img_height, patch_x0_rel, patch_y0_rel, patch_width_rel, patch_height_rel)
+    orig_height, orig_width, _ = image.shape
+    max_side = max(orig_height, orig_width)
+    # Increment on each side:
+    increment_height = int(max_side - orig_height)
+    increment_top = int(np.round(increment_height / 2.0))
+    increment_bottom = increment_height - increment_top
+    increment_width = int(max_side - orig_width)
+    increment_left = int(np.round(increment_width / 2.0))
+    increment_right = increment_width - increment_left
+    image = cv2.copyMakeBorder(image, increment_top, increment_bottom, increment_left, increment_right, cv2.BORDER_CONSTANT)
+    # Warp and shift boxes:
+    rel_incr_left = float(increment_left) / orig_width
+    rel_incr_right = float(increment_right) / orig_width
+    rel_incr_top = float(increment_top) / orig_height
+    rel_incr_bottom = float(increment_bottom) / orig_height
+    bboxes[:, 1] = (bboxes[:, 1] + rel_incr_left) / (1.0 + rel_incr_left + rel_incr_right)
+    bboxes[:, 2] = (bboxes[:, 2] + rel_incr_top) / (1.0 + rel_incr_top + rel_incr_bottom)
+    bboxes[:, 3] = bboxes[:, 3] / (1.0 + rel_incr_left + rel_incr_right)
+    bboxes[:, 4] = bboxes[:, 4] / (1.0 + rel_incr_top + rel_incr_bottom)
+    return image, bboxes
+
+
+def sample_random_patch(image, bboxes, img_side, min_scale, max_scale):
+    # image: (img_side, img_side, 3)
+    # bboxes: (n_gt, 6) [class_id, xmin, ymin, width, height, percent_contained]
+    patch_x0_rel, patch_y0_rel, patch_width_rel, patch_height_rel = make_patch_shape(img_side, min_scale, max_scale)
+    patch, remaining_boxes = sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_width_rel, patch_height_rel)
     # patch: (patch_side_abs, patch_side_abs, 3)
     # remaining_boxes: (n_remaining_boxes, 6) [class_id, xmin, ymin, width, height, percent_contained]
     return patch, remaining_boxes
 
 
-def sample_patch(image, bboxes, img_width, img_height, patch_x0_rel, patch_y0_rel, patch_width_rel, patch_height_rel):
-    # image: (height, width, 3)
+def sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_width_rel, patch_height_rel):
+    # image: (img_side, img_side, 3)
     # bboxes: (n_gt, 6) [class_id, xmin, ymin, width, height, percent_contained]
     # Convert to absolute coordinates:
-    patch_x0_abs = max(np.round(patch_x0_rel * img_width).astype(np.int32), 0)
-    patch_y0_abs = max(np.round(patch_y0_rel * img_height).astype(np.int32), 0)
-    patch_width_abs = min(np.round(patch_width_rel * img_width).astype(np.int32), img_width - patch_x0_abs)
-    patch_height_abs = min(np.round(patch_height_rel * img_height).astype(np.int32), img_height - patch_y0_abs)
+    patch_x0_abs = max(np.round(patch_x0_rel * img_side).astype(np.int32), 0)
+    patch_y0_abs = max(np.round(patch_y0_rel * img_side).astype(np.int32), 0)
+    patch_width_abs = min(np.round(patch_width_rel * img_side).astype(np.int32), img_side - patch_x0_abs)
+    patch_height_abs = min(np.round(patch_height_rel * img_side).astype(np.int32), img_side - patch_y0_abs)
     assert patch_width_abs == patch_height_abs, 'Patch has different width and height.'
     patch_side_abs = patch_height_abs
     # Image:
@@ -137,20 +176,17 @@ def compute_pc(gt_boxes, patch):
     return pc
 
 
-def make_patch_shape(img_width, img_height, min_scale, max_scale):
+def make_patch_shape(img_side, min_scale, max_scale):
     scale = np.random.rand() * (max_scale - min_scale) + min_scale
-    patch_side = np.sqrt(scale * float(img_width) * float(img_height))
-    patch_side = np.minimum(np.maximum(np.round(patch_side), 1), img_width).astype(np.int32)
-    print('patch_side = ' + str(patch_side))
-    print('img_width = ' + str(img_width))
-    print('img_height = ' + str(img_height))
-    x0 = np.random.randint(img_width - patch_side + 1)
-    y0 = np.random.randint(img_height - patch_side + 1)
+    patch_side = scale * img_side
+    patch_side = np.minimum(np.maximum(np.round(patch_side), 1), img_side).astype(np.int32)
+    x0 = np.random.randint(img_side - patch_side + 1)
+    y0 = np.random.randint(img_side - patch_side + 1)
     # Convert to relative coordinates:
-    x0 = x0 / float(img_width)
-    y0 = y0 / float(img_height)
-    patch_width = patch_side / float(img_width)
-    patch_height = patch_side / float(img_height)
+    x0 = x0 / float(img_side)
+    y0 = y0 / float(img_side)
+    patch_width = patch_side / float(img_side)
+    patch_height = patch_side / float(img_side)
     return x0, y0, patch_width, patch_height
 
 

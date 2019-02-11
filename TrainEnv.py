@@ -246,7 +246,7 @@ class TrainEnv:
 
     # ------------------------------------------------------------------------------------------------------------------
     def generate_graph(self):
-        self.single_cell_arch = SingleCellArch.SingleCellArch(self.opts.single_cell_opts, TrainDataReader.get_n_classes(self.opts))
+        self.single_cell_arch = SingleCellArch.SingleCellArch(self.opts.single_cell_opts, TrainDataReader.get_n_classes(self.opts), self.opts.outdir)
         self.define_inputs_and_labels()
         _, self.loss, self.metrics = self.single_cell_arch.make(self.inputs, self.labels, self.filenames)
         self.model_variables = [n.name for n in tf.global_variables()]
