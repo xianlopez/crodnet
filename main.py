@@ -101,8 +101,6 @@ def common_stuff(inline_args):
         raise Exception(err_msg)
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = str(level)
 
-    tools.batch_size = args.batch_size
-
     # Create experiment folder:
     if args.experiments_folder[0] == '.':  # Relative path
         args.experiments_folder = tools.join_paths(os.getcwd(), args.experiments_folder[2:])

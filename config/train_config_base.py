@@ -11,12 +11,11 @@ class TrainConfiguration:
     ##################################
     ######### TRAINING OPTS ##########
     num_epochs = 5
-    batch_size = 32
     optimizer_name = 'sgd'  # 'sgd', 'adam', 'rmsprop'
     learning_rate = 1e-3
     momentum = 0.9
     l2_regularization = 5e-4
-    vars_to_skip_l2_reg = ['scale', 'biases', 'BatchNorm'] # List with strings contained by the variables that you don't want to add to the L2 regularization loss.
+    vars_to_skip_l2_reg = ['scale', 'bias', 'BatchNorm'] # List with strings contained by the variables that you don't want to add to the L2 regularization loss.
     nbatches_accum = 0 # 0 to not applyl batch accumulation.
     # If train_selected_layers is true, the layers in layers_list are the only ones that are going to be trained.
     # Otherwise, those are the only layers excluded for training.

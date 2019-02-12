@@ -44,8 +44,9 @@ class TrainDataReader:
         self.train_init_op = None
         self.val_init_op = None
         self.dirdata = os.path.join(opts.root_of_datasets, opts.dataset_name)
-        self.img_extension, self.classnames = tools.process_dataset_config(
-            os.path.join(self.dirdata, 'dataset_info.xml'))
+        self.img_extension, self.classnames = tools.process_dataset_config(os.path.join(self.dirdata, 'dataset_info.xml'))
+        print('class names in TrainDataReader')
+        print(self.classnames)
         self.img_extension = '.' + self.img_extension
         self.outdir = opts.outdir
         self.write_network_input = opts.write_network_input

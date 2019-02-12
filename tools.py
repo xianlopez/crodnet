@@ -95,7 +95,6 @@ def process_dataset_config(dataset_info_path):
 
 # ----------------------------------------------------------------------------------------------------------------------
 def plot_training_history(train_metrics, train_loss, val_metrics, val_loss, metric_names, args, epoch_num):
-
     metrics_colors = ['r', 'g', 'y', 'm', 'c']
     if len(train_loss) >= 2 or len(val_loss) >= 2:
 
@@ -574,7 +573,7 @@ def keep_last_part_of_path(full_path, first_part):
         if subfolders_full[i] != subfolders_first[i]:
             print('full_path: ' + full_path)
             print('first_part: ' + first_part)
-            raise Exception("first_part not contained in full_path")
+            raise Exception('first_part not contained in full_path')
     last_part = subfolders_full[len(subfolders_first)]
     if len(subfolders_full) > len(subfolders_first) + 1:
         for i in range(len(subfolders_first) + 1, len(subfolders_full)):

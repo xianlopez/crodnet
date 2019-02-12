@@ -19,9 +19,22 @@ class SingleCellArch:
         self.n_metrics = 3
         self.metric_names = ['accuracy_conf', 'iou_mean', 'accuracy_comp']
         self.outdir = outdir
-        self.batch_count = 0
+        self.classnames = None
+        assert self.opts.n_images_per_batch >= 2, 'n_images_per_batch must be at least 2.'
         if self.opts.debug and self.outdir is None:
-            raise Exception('outdir must be specified in debug is True.')
+            raise Exception('outdir must be specified if debug is True.')
+        self.proportion_valid_comparisons = 0
+        self.proportion_same_comparisons = 0
+        self.batch_count = 0
+
+    def set_classnames(self, classnames):
+        print('Setting classnames')
+        self.classnames = []
+        for name in classnames:
+            self.classnames.append(name)
+        self.classnames.append('background')
+        print('classnames')
+        print(self.classnames)
 
     def make(self, inputs, labels_enc, filenames):
         # inputs: (n_images_per_batch, n_crops_per_image, input_image_size, input_image_size, 3)
@@ -115,20 +128,20 @@ class SingleCellArch:
 
         conf_loss, accuracy_conf = classification_loss_and_metric(pred_conf, mask_match, mask_neutral,
                                                                   gt_class_ids, zeros, n_positives)
-        tf.summary.scalar("conf_loss", conf_loss)
-        tf.summary.scalar("accuracy_conf", accuracy_conf)
+        tf.summary.scalar('losses/conf_loss', conf_loss)
+        tf.summary.scalar('metrics/accuracy_conf', accuracy_conf)
         total_loss = conf_loss
 
         loc_loss, iou_mean = localization_loss_and_metric(pred_coords, mask_match, gt_coords, zeros, n_positives,
                                                           self.opts.loc_loss_factor, self.opts)
-        tf.summary.scalar("loc_loss", loc_loss)
-        tf.summary.scalar("iou_mean", iou_mean)
+        tf.summary.scalar('losses/loc_loss', loc_loss)
+        tf.summary.scalar('metrics/iou_mean', iou_mean)
         total_loss += loc_loss
 
         comp_loss, accuracy_comp = comparison_loss_and_metric(comparisons_pred, comparisons_labels, comparisons_indices,
                                                               mask_match, mask_neutral, self.opts.comp_loss_factor)
-        tf.summary.scalar("comp_loss", comp_loss)
-        tf.summary.scalar("accuracy_comp", accuracy_comp)
+        tf.summary.scalar('losses/comp_loss', comp_loss)
+        tf.summary.scalar('metrics/accuracy_comp', accuracy_comp)
         total_loss += comp_loss
 
         metrics = tf.stack([accuracy_conf, iou_mean, accuracy_comp])  # (n_metrics)
@@ -333,6 +346,8 @@ class SingleCellArch:
         # comparisons_labels: (total_comparisons)
         # comparisons_indices: (total_comparisons, 2)
         # filenames: (n_images_per_batch)
+        if self.classnames is None:
+            raise Exception('classnames must be specified if debug is True.')
         self.batch_count += 1
         batch_dir = os.path.join(self.outdir, 'batch' + str(self.batch_count))
         os.makedirs(batch_dir)
@@ -347,16 +362,17 @@ class SingleCellArch:
                 crop = inputs_reord[i, ...]  # (input_image_size, input_image_size, 3)
                 crop = add_mean_again(crop)
                 label_enc = labels_enc_reord[i, :]
-                gt_class = CommonEncoding.get_gt_class(label_enc)
+                gt_class = int(CommonEncoding.get_gt_class(label_enc))
                 gt_coords_enc = CommonEncoding.get_gt_coords(label_enc)
                 gt_coords_dec = decode_boxes_np(gt_coords_enc, self.opts)
                 is_match = mask_match[i]
                 is_neutral = mask_neutral[i]
                 predicted_class = np.argmax(loc_and_classif[i, 4:])
                 if is_neutral:
-                    crop_path = os.path.join(batch_dir, name + '_crop' + str(i) + '_neutral_PRED-' + str(predicted_class) + '.png')
+                    crop_path = os.path.join(batch_dir, name + '_crop' + str(i) + '_NEUTRAL_PRED-' + self.classnames[predicted_class] + '.png')
                 else:
-                    crop_path = os.path.join(batch_dir, name + '_crop' + str(i) + '_PRED-' + str(predicted_class) + '.png')
+                    crop_path = os.path.join(batch_dir, name + '_crop' + str(i) + '_GT-' + self.classnames[gt_class] +
+                                             '_PRED-' + self.classnames[predicted_class] + '.png')
                     if gt_class != self.background_id:
                         class_and_coords = np.concatenate([np.expand_dims(gt_class, axis=0), gt_coords_dec], axis=0)  # (5)
                         class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
@@ -381,6 +397,8 @@ class SingleCellArch:
         inter_dir = os.path.join(batch_dir, 'inter_comparisons')
         os.makedirs(intra_dir)
         os.makedirs(inter_dir)
+        n_diff = 0
+        n_same = 0
         for i in range(total_comparisons):
             idx1 = comparisons_indices[i, 0]
             idx2 = comparisons_indices[i, 1]
@@ -395,7 +413,7 @@ class SingleCellArch:
                 any_match = mask_match[idx1] or mask_match[idx2]
                 # Box of crop 1:
                 label_enc_1 = labels_enc_reord[idx1, :]
-                gt_class_1 = CommonEncoding.get_gt_class(label_enc_1)
+                gt_class_1 = int(CommonEncoding.get_gt_class(label_enc_1))
                 gt_coords_enc_1 = CommonEncoding.get_gt_coords(label_enc_1)
                 gt_coords_dec_1 = decode_boxes_np(gt_coords_enc_1, self.opts)
                 if gt_class_1 != self.background_id:
@@ -404,7 +422,7 @@ class SingleCellArch:
                     crop1 = tools.add_bounding_boxes_to_image(crop1, class_and_coords, color=(255, 0, 0))
                 # Box of crop 2:
                 label_enc_2 = labels_enc_reord[idx2, :]
-                gt_class_2 = CommonEncoding.get_gt_class(label_enc_2)
+                gt_class_2 = int(CommonEncoding.get_gt_class(label_enc_2))
                 gt_coords_enc_2 = CommonEncoding.get_gt_coords(label_enc_2)
                 gt_coords_dec_2 = decode_boxes_np(gt_coords_enc_2, self.opts)
                 if gt_class_2 != self.background_id:
@@ -413,13 +431,15 @@ class SingleCellArch:
                     crop2 = tools.add_bounding_boxes_to_image(crop2, class_and_coords, color=(255, 0, 0))
                 # Label and prediction:
                 if any_neutral:
-                    gt_comp = 'neutral'
+                    gt_comp = 'NEUTRAL'
                 elif not any_match:
-                    gt_comp = 'nomatches'
+                    gt_comp = 'NOMATCHES'
                 elif comparisons_labels[i] > 0.5:
                     gt_comp = 'same'
+                    n_same += 1
                 else:
                     gt_comp = 'diff'
+                    n_diff += 1
                 if comparisons_pred[i, 1] > comparisons_pred[i, 0]:
                     pred_comp = 'same'
                 else:
@@ -436,6 +456,18 @@ class SingleCellArch:
             except:
                 print('Error with pair ' + name1 + ' - ' + name2)
                 raise
+
+        total_valid_comparisons = n_same + n_diff
+        proportion_valid_this_batch = float(total_valid_comparisons) / total_comparisons
+        proportion_same_this_batch = float(n_same) / total_valid_comparisons
+        self.proportion_valid_comparisons = (self.proportion_valid_comparisons * (self.batch_count - 1) +
+                                             proportion_valid_this_batch) / float(self.batch_count)
+        self.proportion_same_comparisons = (self.proportion_same_comparisons * (self.batch_count - 1) +
+                                            proportion_same_this_batch) / float(self.batch_count)
+        print('Percent of valid comparisons. This batch: {:3.2f}. Acummulated: {:3.2f}'.format(proportion_valid_this_batch * 100.0,
+                                                                                               self.proportion_valid_comparisons * 100.0))
+        print('Percent of same comparisons. This batch: {:3.2f}. Acummulated: {:3.2f}'.format(proportion_same_this_batch * 100.0,
+                                                                                               self.proportion_same_comparisons * 100.0))
 
         return metrics
 
@@ -519,7 +551,7 @@ def comparison_loss_and_metric(comparisons_pred, comparisons_labels, comparisons
         # Metric:
         predicted_class = tf.argmax(comparisons_pred, axis=1, output_type=tf.int32)  # (total_comparisons)
         hits = tf.cast(tf.equal(comparisons_labels_int, predicted_class), tf.float32)  # (total_comparisons)
-        hits_matches = tf.where(any_match, hits, zeros)  # (total_comparisons)
+        hits_matches = tf.where(comps_to_consider, hits, zeros)  # (total_comparisons)
         n_hits = tf.reduce_sum(hits_matches)  # ()
         accuracy_comp = tf.divide(n_hits, n_matches_safe)  # ()
     return loss_comp, accuracy_comp

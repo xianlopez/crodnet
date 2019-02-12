@@ -5,9 +5,9 @@ import network
 
 class ImageCropperOptions:
     def __init__(self):
-        self.padding_factor = 0.5
-        self.min_side_scale = 0.1
-        self.max_side_scale = 0.8
+        self.padding_factor = 0.25
+        self.min_side_scale = 0.05
+        self.max_side_scale = 0.7
 
 
 class ImageCropper:

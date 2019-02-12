@@ -21,7 +21,6 @@ def L2RegularizationLoss(args):
                 logging.info('Not adding ' + var.name + ' to regularization loss')
         # reg_loss *= args.l2_regularization / 2.0
         reg_loss = tf.multiply(reg_loss, args.l2_regularization, name='reg_loss')
-        # reg_loss *= args.l2_regularization
-        # reg_loss = tf.Print(reg_loss, [reg_loss], 'reg loss')
-        tf.summary.scalar('reg_loss', reg_loss)
+
+    tf.summary.scalar('losses/reg_loss', reg_loss)
     return reg_loss

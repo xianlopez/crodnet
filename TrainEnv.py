@@ -53,8 +53,6 @@ class TrainEnv:
         self.accum_ops = None
         self.train_step = None
 
-        self.metric_names = ['class_accuracy', 'iou_mean', 'mean_ap', 'repetitions']
-
         # Initialize network:
         self.generate_graph()
 
@@ -160,7 +158,7 @@ class TrainEnv:
                             logging.info('Train ' + self.single_cell_arch.metric_names[m_idx] + ': %.2f' % train_metrics[m_idx])
                     else:
                         logging.info('Mean train loss during epoch: %.2e' % loss_mean)
-                        for m_idx in range(len(self.single_cell_arch.n_metrics)):
+                        for m_idx in range(self.single_cell_arch.n_metrics):
                             logging.info('Mean train ' + self.single_cell_arch.metric_names[m_idx] + ' during epoch: %.2f' % metrics_mean[m_idx])
                     train_losses.append(loss_mean)
                     train_metrics.append(metrics_mean)
@@ -171,14 +169,14 @@ class TrainEnv:
                     val_losses.append(val_loss)
                     val_metrics.append(metrics)
                     logging.info('Val loss: %.2e' % val_loss)
-                    for m_idx in range(len(self.single_cell_arch.n_metrics)):
+                    for m_idx in range(self.single_cell_arch.n_metrics):
                         logging.info('Val ' + self.single_cell_arch.metric_names[m_idx] + ': %.2f' % metrics[m_idx])
                 else:
                     val_loss = None
 
                 # Plot training progress:
                 if epoch % self.opts.nepochs_checktrain == 0 or epoch % self.opts.nepochs_checkval == 0:
-                    tools.plot_training_history(train_metrics, train_losses, val_metrics, val_losses, self.metric_names, self.opts, epoch)
+                    tools.plot_training_history(train_metrics, train_losses, val_metrics, val_losses, self.single_cell_arch.metric_names, self.opts, epoch)
 
                 # Save the model:
                 if epoch % self.opts.nepochs_save == 0:
@@ -254,7 +252,7 @@ class TrainEnv:
             self.loss += L2RegularizationLoss(self.opts)
         self.loss = tf.identity(self.loss, name='loss') # This is just a workaround to rename the loss function to 'loss'
         # Tensorboard:
-        tf.summary.scalar("loss", self.loss)
+        tf.summary.scalar("final_loss", self.loss)
 
         self.build_optimizer()
 
@@ -268,6 +266,11 @@ class TrainEnv:
             self.reader = TrainDataReader.TrainDataReader(self.input_shape, self.opts, self.single_cell_arch)
             self.inputs, self.labels, self.filenames = self.reader.build_iterator()
         self.classnames = self.reader.classnames
+        print('class names before setting')
+        print(self.classnames)
+        self.single_cell_arch.set_classnames(self.classnames)
+        print('class names after setting')
+        print(self.classnames)
         self.nclasses = len(self.classnames)
 
     # ------------------------------------------------------------------------------------------------------------------
