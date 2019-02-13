@@ -25,7 +25,7 @@ def main(inline_args):
         if inline_args.run == 'train':
             result = train(args)
         elif inline_args.run == 'evaluate':
-            result = evaluate(args)
+            result = evaluate(args, inline_args.split)
         else:
             raise Exception('Please, select specify a valid execution mode: train / evaluate')
 
@@ -43,18 +43,8 @@ def main(inline_args):
 
 def import_config_files(inline_args):
 
-    if inline_args.run == 'train':
-        configModuleName = 'train_config'
-        class2load = "UpdateTrainConfiguration"
-    elif inline_args.run == 'evaluate':
-        configModuleName = 'eval_config'
-        class2load = "UpdateEvaluateConfiguration"
-    elif inline_args.run == 'predict':
-        configModuleName = 'predict_config'
-        class2load = "UpdatePredictConfiguration"
-    else:
-        print('Please, select specify a valid execution mode: train / evaluate / predict')
-        raise Exception()
+    configModuleName = 'train_config'
+    class2load = "UpdateTrainConfiguration"
 
     if inline_args.conf is not None:
         configModuleName = configModuleName + '_' + inline_args.conf
@@ -130,10 +120,11 @@ def parse_args():
                         help='run mode options: train / evaluate')
     parser.add_argument('-gpu', type=int, default=0,
                         help='GPU ID on which to execute')
-
     parser.add_argument('-conf', type=str, default=None,
                         help='Choose an existing configuration in .' + os.sep + 'config' + os.sep + ' folder. Ignore the initial ''*_config_'' part. '
                              'If not specified, uses train_config.py or eval_config.py depending on -r argument.' )
+    parser.add_argument('-split', type=str, default='val',
+                        help='Split on which to evaluate')
 
     arguments = parser.parse_args()
 
@@ -144,19 +135,19 @@ def parse_args():
 def train(args):
     print('run mode: train')
 
-    bln = TrainEnv.TrainEnv(args)
+    te = TrainEnv.TrainEnv(args)
 
-    result = bln.train()
+    result = te.train()
 
     return result
 
 
-def evaluate(args):
+def evaluate(args, split):
     print('run mode: evaluate')
 
-    bln = TrainEnv.TrainEnv(args)
+    te = TrainEnv.TrainEnv(args)
 
-    result = bln.evaluate(args.split)
+    result = te.evaluate(split)
 
     return result
 

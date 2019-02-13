@@ -34,9 +34,6 @@ class TrainDataReader:
         self.buffer_size = opts.buffer_size
         self.preprocessor = Preprocessor.Preprocessor(self.input_width, self.input_height)
 
-        self.resize_function = Resizer.ResizerWithLabels(self.input_width, self.input_height).get_resize_func(
-            opts.resize_method)
-
         self.percent_of_data = opts.percent_of_data
         self.max_image_size = opts.max_image_size
         self.nimages_train = None

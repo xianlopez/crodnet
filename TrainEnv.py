@@ -57,6 +57,20 @@ class TrainEnv:
         self.generate_graph()
 
     # ------------------------------------------------------------------------------------------------------------------
+    def evaluate(self, split):
+        print('')
+        logging.info("Start evaluation")
+        with tf.Session(config=tools.get_config_proto(self.opts.gpu_memory_fraction)) as sess:
+            self.initialize(sess)
+            logging.info('Computing metrics on ' + split + ' data')
+            loss_mean, metrics_mean = self.evaluate_on_dataset(split, sess)
+            logging.info('Loss: %.2e' % loss_mean)
+            for m_idx in range(self.single_cell_arch.n_metrics):
+                logging.info(self.single_cell_arch.metric_names[m_idx] + ': %.2f' % metrics_mean[m_idx])
+
+        return
+
+    # ------------------------------------------------------------------------------------------------------------------
     def evaluate_on_dataset(self, split, sess):
         logging.info('Computing loss and metrics on ' + split + ' data')
         initime = time.time()

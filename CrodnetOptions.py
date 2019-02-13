@@ -60,4 +60,5 @@ class SingleCellOptions:
 
         self.encoding_method = 'ssd'
 
-        self.debug = False
+        self.debug_train = False
+        self.debug_eval = False

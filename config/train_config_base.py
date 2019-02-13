@@ -1,9 +1,8 @@
-from mean_ap import MeanAPOpts
 from DataAugmentation import DataAugOpts
 import CrodnetOptions
 from LRScheduler import LRPolicies, LRSchedulerOpts
 from ImageCropper import ImageCropperOptions
-
+import os
 
 
 ########### ALL CONFIG ###########
@@ -26,14 +25,7 @@ class TrainConfiguration:
     layers_list = []  # If this is empy or none, all variables are trained.
     ##################################
 
-
-    ##################################
-    ######### MODEL AND DATA #########
-    model_name = ''  # 'vgg16', 'resnet50', 'yolo'
-    loss_name = '' # 'cross-entropy', 'yololoss'
     dataset_name = ''  # Any folder in the <<root_of_datasets>> directory.
-    ##################################
-
 
     ##################################
     ######### INITIALIZATION #########
@@ -41,15 +33,10 @@ class TrainConfiguration:
     # To start from sratch, choose 'scratch'
     # To load pretrained weights, and start training with them, choose 'load-pretrained'
     initialization_mode = 'load-pretrained'  # 'load-pretrained', 'scratch'
-    # To load pretrained weights:
-    # weights_file = r'.\weights\pretrained\YOLO_small.ckpt'
-    # weights_file = r'.\weights\pretrained\vgg_16.ckpt'
-    # weights_file = r'.\weights\pretrained\resnet_v1_50.ckpt'
     weights_file = r''
     modified_scopes = []
     restore_optimizer = False
     ##################################
-
 
     lr_scheduler_opts = LRSchedulerOpts(LRPolicies.onCommand)
 
@@ -60,22 +47,6 @@ class TrainConfiguration:
     single_cell_opts = CrodnetOptions.SingleCellOptions()
 
     image_cropper_opts = ImageCropperOptions()
-
-
-    ##################################
-    ############ RESIZING ############
-    # Select the way to fit the image to the size required by the network.
-    # For DETECTION, use ONLY RESIZE_WARP.
-    # 'resize_warp': Resize both sides of the image to the required sizes. Aspect ratio may be changed.
-    # 'resize_pad_zeros': Scale the image until it totally fits inside the required shape. We pad with zeros the areas
-    #                     in which there is no image. Aspect ratio is preserved.
-    # 'resize_lose_part': Scale the image until it totally covers the area that the network will see. We may lose the
-    #                     upper and lower parts, or the left and right ones. Aspect ratio is preserved.
-    # 'centered_crop': Take a centered crop of the image. If any dimension of the image is smaller than the input
-    #                  size, we pad with zeros.
-    resize_method = 'resize_warp'  # 'resize_warp', 'resize_pad_zeros', 'resize_lose_part', 'centered_crop'
-    ##################################
-
 
     ##################################
     ######## DISPLAYING OPTS #########
@@ -89,34 +60,23 @@ class TrainConfiguration:
     nepochs_checkval = 1
     ##################################
 
-
-    mean_ap_opts = MeanAPOpts()
-
-
-    ##################################
-    ####### ONLY FOR DETECTION #######
-    th_conf_detection_evaluate = 0.2
-    th_conf_detection_predict = 0.6
-    # grid_size = 7  # The amount of horizontal (and vertical) cells in which we will divide the image
-    threshold_iou_map = 0.5  # Threshold for intersection over union.
-    nonmaxsup = True  # Non-maximum supression
-    threshold_nms = 0.5  # Non-maximum supression threshold
-
-
     ##################################
     ########### OTHER OPTS ###########
     percent_of_data = 100  # For debbuging. Percentage of data to use. Put 100 if not debbuging
     num_workers = 8  # Number of parallel processes to read the data.
-    root_of_datasets = r'D:\datasets'
-    # Jaume ONLY:
-    #root_of_datasets = r'D:\IMGS\DATASETS\DAVSETS'
-    experiments_folder = r'.\experiments'
+    if os.name == 'nt':  # Windows
+        root_of_datasets = r'D:\datasets'
+        experiments_folder = r'.\experiments'
+    elif os.name == 'posix':  # Linux
+        root_of_datasets = r'/home/xian/datasets'
+        experiments_folder = r'./experiments'
+    else:
+        raise Exception('Unexpected OS')
     random_seed = None  # An integer number, or None in order not to set the random seed.
     tf_log_level = 'ERROR'
     buffer_size = 1000 # For shuffling data.
     max_image_size = 600
     gpu_memory_fraction = -1.0
-    write_image_after_data_augmentation = False
     write_network_input = False
     shuffle_data = True
     ##################################

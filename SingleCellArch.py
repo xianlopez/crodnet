@@ -21,8 +21,10 @@ class SingleCellArch:
         self.outdir = outdir
         self.classnames = None
         assert self.opts.n_images_per_batch >= 2, 'n_images_per_batch must be at least 2.'
-        if self.opts.debug and self.outdir is None:
-            raise Exception('outdir must be specified if debug is True.')
+        if (self.opts.debug_train or self.opts.debug_eval) and self.outdir is None:
+            raise Exception('outdir must be specified if debugging is True.')
+        if self.opts.debug_eval:
+            self.create_folders_for_eval_debug()
         self.proportion_valid_comparisons = 0
         self.proportion_same_comparisons = 0
         self.batch_count = 0
@@ -51,9 +53,13 @@ class SingleCellArch:
         # comparisons_labels: (total_comparisons)
         loss, metrics = self.make_loss_and_metrics(loc_and_classif, labels_enc_reord, comparisons_pred,
                                                    comparisons_labels, comparisons_indices)  # ()
-        if self.opts.debug:
-            metrics = tf.py_func(self.write_debug_info, [metrics, inputs_reord, labels_enc_reord, loc_and_classif,
+        if self.opts.debug_train:
+            metrics = tf.py_func(self.write_train_debug_info, [metrics, inputs_reord, labels_enc_reord, loc_and_classif,
                                                          comparisons_pred, comparisons_labels, comparisons_indices, filenames], (tf.float32))
+        if self.opts.debug_eval:
+            metrics = tf.py_func(self.write_eval_debug_info, [metrics, inputs_reord, labels_enc_reord, loc_and_classif,
+                                                         comparisons_pred, comparisons_labels, comparisons_indices, filenames], (tf.float32))
+
         return loc_and_classif, loss, metrics
 
     def make_comparisons(self, common_representation, labels_enc_reord):
@@ -338,7 +344,7 @@ class SingleCellArch:
             predictions.append(gtbox)
         return predictions
 
-    def write_debug_info(self, metrics, inputs_reord, labels_enc_reord, loc_and_classif, comparisons_pred, comparisons_labels, comparisons_indices, filenames):
+    def write_train_debug_info(self, metrics, inputs_reord, labels_enc_reord, loc_and_classif, comparisons_pred, comparisons_labels, comparisons_indices, filenames):
         # inputs_reord: (batch_size, input_image_size, input_image_size, 3)
         # labels_enc_reord: (batch_size, n_labels)
         # loc_and_classif: (batch_size, 4+nclasses)
@@ -347,7 +353,7 @@ class SingleCellArch:
         # comparisons_indices: (total_comparisons, 2)
         # filenames: (n_images_per_batch)
         if self.classnames is None:
-            raise Exception('classnames must be specified if debug is True.')
+            raise Exception('classnames must be specified if debugging.')
         self.batch_count += 1
         batch_dir = os.path.join(self.outdir, 'batch' + str(self.batch_count))
         os.makedirs(batch_dir)
@@ -452,6 +458,165 @@ class SingleCellArch:
                 separator = np.zeros(shape=(network.receptive_field_size, 10, 3), dtype=np.float32)
                 mosaic = np.concatenate([crop1, separator, crop2], axis=1)  # (2*input_image_size+10, input_image_size, 3)
                 cv2.imwrite(mosaic_path, cv2.cvtColor(mosaic.astype(np.uint8), cv2.COLOR_RGB2BGR))
+
+            except:
+                print('Error with pair ' + name1 + ' - ' + name2)
+                raise
+
+        total_valid_comparisons = n_same + n_diff
+        proportion_valid_this_batch = float(total_valid_comparisons) / total_comparisons
+        proportion_same_this_batch = float(n_same) / total_valid_comparisons
+        self.proportion_valid_comparisons = (self.proportion_valid_comparisons * (self.batch_count - 1) +
+                                             proportion_valid_this_batch) / float(self.batch_count)
+        self.proportion_same_comparisons = (self.proportion_same_comparisons * (self.batch_count - 1) +
+                                            proportion_same_this_batch) / float(self.batch_count)
+        print('Percent of valid comparisons. This batch: {:3.2f}. Acummulated: {:3.2f}'.format(proportion_valid_this_batch * 100.0,
+                                                                                               self.proportion_valid_comparisons * 100.0))
+        print('Percent of same comparisons. This batch: {:3.2f}. Acummulated: {:3.2f}'.format(proportion_same_this_batch * 100.0,
+                                                                                               self.proportion_same_comparisons * 100.0))
+
+        return metrics
+
+    def create_folders_for_eval_debug(self):
+        self.localizations_dir = os.path.join(self.outdir, 'localizations')
+        self.correct_class_dir = os.path.join(self.localizations_dir, 'correct')
+        self.wrong_class_dir = os.path.join(self.localizations_dir, 'wrong')
+        os.makedirs(self.localizations_dir)
+        os.makedirs(self.correct_class_dir)
+        os.makedirs(self.wrong_class_dir)
+        self.comparisons_dir = os.path.join(self.outdir, 'comparisons')
+        self.comparison_same = os.path.join(self.comparisons_dir, 'gt_same')
+        self.comparison_diff = os.path.join(self.comparisons_dir, 'gt_diff')
+        self.comparison_same_correct = os.path.join(self.comparison_same, 'correct')
+        self.comparison_same_wrong = os.path.join(self.comparison_same, 'wrong')
+        self.comparison_diff_correct = os.path.join(self.comparison_diff, 'correct')
+        self.comparison_diff_wrong = os.path.join(self.comparison_diff, 'wrong')
+        os.makedirs(self.comparisons_dir)
+        os.makedirs(self.comparison_same)
+        os.makedirs(self.comparison_diff)
+        os.makedirs(self.comparison_same_correct)
+        os.makedirs(self.comparison_same_wrong)
+        os.makedirs(self.comparison_diff_correct)
+        os.makedirs(self.comparison_diff_wrong)
+
+    def write_eval_debug_info(self, metrics, inputs_reord, labels_enc_reord, loc_and_classif, comparisons_pred, comparisons_labels, comparisons_indices, filenames):
+        # inputs_reord: (batch_size, input_image_size, input_image_size, 3)
+        # labels_enc_reord: (batch_size, n_labels)
+        # loc_and_classif: (batch_size, 4+nclasses)
+        # comparisons_pred: (total_comparisons, 2)
+        # comparisons_labels: (total_comparisons)
+        # comparisons_indices: (total_comparisons, 2)
+        # filenames: (n_images_per_batch)
+        if self.classnames is None:
+            raise Exception('classnames must be specified if debugging.')
+        self.batch_count += 1
+        batch_size = self.opts.n_crops_per_image * self.opts.n_images_per_batch
+        filenames_ext = np.tile(np.expand_dims(filenames, axis=-1), [1, self.opts.n_crops_per_image])  # (n_images_per_batch, n_crops_per_image)
+        filenames_reord = np.reshape(filenames_ext, newshape=(batch_size))  # (batch_size)
+        mask_match = CommonEncoding.get_mask_match(labels_enc_reord) > 0.5  # (batch_size)
+        mask_neutral = CommonEncoding.get_mask_neutral(labels_enc_reord) > 0.5  # (batch_size)
+
+        # Localizations:
+        for i in range(batch_size):
+            name = filenames_reord[i].decode(sys.getdefaultencoding())
+            try:
+                crop = inputs_reord[i, ...]  # (input_image_size, input_image_size, 3)
+                crop = add_mean_again(crop)
+                label_enc = labels_enc_reord[i, :]
+                gt_class = int(CommonEncoding.get_gt_class(label_enc))
+                is_match = mask_match[i]
+                is_neutral = mask_neutral[i]
+                predicted_class = np.argmax(loc_and_classif[i, 4:])
+                if not is_neutral:
+                    file_name = 'batch' + str(self.batch_count) + '_' + name + '_crop' + str(i) + '_GT-' + \
+                                self.classnames[gt_class] + '_PRED-' + self.classnames[predicted_class] + '.png'
+                    if gt_class == predicted_class:
+                        crop_path = os.path.join(self.correct_class_dir, file_name)
+                    else:
+                        crop_path = os.path.join(self.wrong_class_dir, file_name)
+
+                    if gt_class != self.background_id:
+                        gt_coords_enc = CommonEncoding.get_gt_coords(label_enc)
+                        gt_coords_dec = decode_boxes_np(gt_coords_enc, self.opts)
+                        class_and_coords = np.concatenate([np.expand_dims(gt_class, axis=0), gt_coords_dec], axis=0)  # (5)
+                        class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
+                        crop = tools.add_bounding_boxes_to_image(crop, class_and_coords, color=(255, 0, 0))
+                    else:
+                        assert not is_match, 'is_match is True, and gt_class it background_id.'
+                    if predicted_class != self.background_id:
+                        predicted_coords_enc = loc_and_classif[i, :4]
+                        predicted_coords_dec = decode_boxes_np(predicted_coords_enc, self.opts)
+                        class_and_coords = np.concatenate([np.expand_dims(predicted_class, axis=0), predicted_coords_dec], axis=0)  # (5)
+                        class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
+                        crop = tools.add_bounding_boxes_to_image(crop, class_and_coords, color=(127, 0, 127))
+                    cv2.imwrite(crop_path, cv2.cvtColor(crop.astype(np.uint8), cv2.COLOR_RGB2BGR))
+
+            except:
+                print('Error with image ' + name)
+                raise
+
+        # Comparisons:
+        total_comparisons = (self.opts.n_comparisons_inter + self.opts.n_comparisons_intra) * self.opts.n_images_per_batch
+        n_diff = 0
+        n_same = 0
+        for i in range(total_comparisons):
+            idx1 = comparisons_indices[i, 0]
+            idx2 = comparisons_indices[i, 1]
+            name1 = filenames_reord[idx1].decode(sys.getdefaultencoding())
+            name2 = filenames_reord[idx2].decode(sys.getdefaultencoding())
+            try:
+                any_neutral = mask_neutral[idx1] or mask_neutral[idx2]
+                any_match = mask_match[idx1] or mask_match[idx2]
+                is_of_interest = any_match and not any_neutral
+                if is_of_interest:
+                    crop1 = inputs_reord[idx1, ...]  # (input_image_size, input_image_size, 3)
+                    crop2 = inputs_reord[idx2, ...]  # (input_image_size, input_image_size, 3)
+                    crop1 = add_mean_again(crop1)
+                    crop2 = add_mean_again(crop2)
+                    # Box of crop 1:
+                    label_enc_1 = labels_enc_reord[idx1, :]
+                    gt_class_1 = int(CommonEncoding.get_gt_class(label_enc_1))
+                    if gt_class_1 != self.background_id:
+                        gt_coords_enc_1 = CommonEncoding.get_gt_coords(label_enc_1)
+                        gt_coords_dec_1 = decode_boxes_np(gt_coords_enc_1, self.opts)
+                        class_and_coords = np.concatenate([np.expand_dims(gt_class_1, axis=0), gt_coords_dec_1], axis=0)  # (5)
+                        class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
+                        crop1 = tools.add_bounding_boxes_to_image(crop1, class_and_coords, color=(255, 0, 0))
+                    # Box of crop 2:
+                    label_enc_2 = labels_enc_reord[idx2, :]
+                    gt_class_2 = int(CommonEncoding.get_gt_class(label_enc_2))
+                    if gt_class_2 != self.background_id:
+                        gt_coords_enc_2 = CommonEncoding.get_gt_coords(label_enc_2)
+                        gt_coords_dec_2 = decode_boxes_np(gt_coords_enc_2, self.opts)
+                        class_and_coords = np.concatenate([np.expand_dims(gt_class_2, axis=0), gt_coords_dec_2], axis=0)  # (5)
+                        class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
+                        crop2 = tools.add_bounding_boxes_to_image(crop2, class_and_coords, color=(255, 0, 0))
+                    # Label and prediction:
+                    if comparisons_labels[i] > 0.5:
+                        gt_comp = 'same'
+                        n_same += 1
+                    else:
+                        gt_comp = 'diff'
+                        n_diff += 1
+                    if comparisons_pred[i, 1] > comparisons_pred[i, 0]:
+                        pred_comp = 'same'
+                    else:
+                        pred_comp = 'diff'
+                    # Make the mosaic and save it:
+                    mosaic_name = 'batch' + str(self.batch_count) + '_comp' + str(i) + '_' + name1 + ' - ' + name2 + '.png'
+                    if gt_comp == pred_comp:
+                        if gt_comp == 'same':
+                            mosaic_path = os.path.join(self.comparison_same_correct, mosaic_name)
+                        else:
+                            mosaic_path = os.path.join(self.comparison_diff_correct, mosaic_name)
+                    else:
+                        if gt_comp == 'same':
+                            mosaic_path = os.path.join(self.comparison_same_wrong, mosaic_name)
+                        else:
+                            mosaic_path = os.path.join(self.comparison_diff_wrong, mosaic_name)
+                    separator = np.zeros(shape=(network.receptive_field_size, 10, 3), dtype=np.float32)
+                    mosaic = np.concatenate([crop1, separator, crop2], axis=1)  # (2*input_image_size+10, input_image_size, 3)
+                    cv2.imwrite(mosaic_path, cv2.cvtColor(mosaic.astype(np.uint8), cv2.COLOR_RGB2BGR))
 
             except:
                 print('Error with pair ' + name1 + ' - ' + name2)
