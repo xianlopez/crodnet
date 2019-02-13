@@ -257,7 +257,7 @@ class TrainEnv:
         self.build_optimizer()
 
         self.define_initializer()
-        self.saver = tf.train.Saver(name='net_saver')
+        self.saver = tf.train.Saver(name='net_saver', max_to_keep=1000000)
 
     # ------------------------------------------------------------------------------------------------------------------
     def define_inputs_and_labels(self):
