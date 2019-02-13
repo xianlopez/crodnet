@@ -59,10 +59,9 @@ class TrainEnv:
     # ------------------------------------------------------------------------------------------------------------------
     def evaluate(self, split):
         print('')
-        logging.info("Start evaluation")
+        logging.info('Start evaluation')
         with tf.Session(config=tools.get_config_proto(self.opts.gpu_memory_fraction)) as sess:
             self.initialize(sess)
-            logging.info('Computing metrics on ' + split + ' data')
             loss_mean, metrics_mean = self.evaluate_on_dataset(split, sess)
             logging.info('Loss: %.2e' % loss_mean)
             for m_idx in range(self.single_cell_arch.n_metrics):
@@ -208,7 +207,7 @@ class TrainEnv:
         if validation_loss is None:
             validation_loss = -1
         # Save new model:
-        save_path = self.saver.save(sess, tools.join_paths(outdir, 'model'), global_step=epoch)
+        save_path = self.saver.save(sess, os.path.join(outdir, 'model'), global_step=epoch)
         logging.info('Model saved to ' + save_path)
         new_checkpoint = Checkpoint(save_path, validation_loss)
 

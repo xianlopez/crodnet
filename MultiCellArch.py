@@ -14,7 +14,7 @@ import CommonEncoding
 
 
 class MultiCellArch:
-    def __init__(self, options, nclasses, is_training, outdir):
+    def __init__(self, options, nclasses, outdir=None):
         self.opts = options
         self.nclasses = nclasses + 1 # The last class id is for the background
         self.background_id = self.nclasses - 1
@@ -24,7 +24,6 @@ class MultiCellArch:
             size_pad = self.opts.grid_levels_size_pad[i]
             self.grid_levels.append(GridLevel(size_pad[0], size_pad[1]))
         self.grid_levels.sort(key=operator.attrgetter('input_size'))
-        self.is_training = is_training
         self.n_boxes = -1
         self.max_pad_rel = -1
         self.max_pad_abs = -1
@@ -33,17 +32,10 @@ class MultiCellArch:
         self.encoded_gt_shape = (self.expected_n_boxes, 9)
         self.outdir = outdir
         self.n_comparisons = -1
-
-        self.input_crops_dir = os.path.join(self.outdir, 'input_crops')
-
-        if os.name == 'nt':
-            _, self.classnames = tools.process_dataset_config(r'D:\datasets\VOC0712_filtered\dataset_info.xml')
-        elif os.name == 'posix':
-            _, self.classnames = tools.process_dataset_config('/home/xian/datasets/VOC0712_filtered/dataset_info.xml')
-        else:
-            raise Exception('Unexpected OS')
-
-        self.classnames.append('background')
+        self.metric_names = ['mAP']
+        self.n_metrics = len(self.metric_names)
+        if (self.opts.debug_train or self.opts.debug_eval) and self.outdir is None:
+            raise Exception('outdir must be specified if debugging is True.')
 
     def get_expected_num_boxes(self):
         expected_n_boxes = 0
@@ -84,235 +76,14 @@ class MultiCellArch:
             inputs_all_sizes.append(inputs_this_grid)
         return inputs_all_sizes
 
-    def add_mean_again(self, image):
-        mean = [123.0, 117.0, 104.0]
-        mean = np.reshape(mean, [1, 1, 3])
-        image = image + mean
-        return image
-
-    def get_input_crop(self, batch_idx, position, inputs_all_sizes):
-        grid_idx, _, _ = self.get_grid_coordinates_from_flat_position(position)
-        xmin, ymin, xmax, ymax = self.get_anchor_coords_wrt_its_input(position, make_absolute=True)
-        # Get the input image that corresponds:
-        inputs = inputs_all_sizes[grid_idx]
-        image = inputs[batch_idx, :, :, :].copy()
-        image = self.add_mean_again(image)
-        # Crop it:
-        crop = image[ymin:ymax, xmin:xmax]
-        return crop
-
-    def write_predictions(self, inputs0, labels_enc, predictions, filenames, net_output, labels2):
-        # labels_enc (batch_size, nboxes x 9)
-        # predictions (batch_size, nboxes, nclasses)
-        # print('')
-        # print('write_predictions')
-
-        inputs_all_sizes = [inputs0]
-
-        correct_dir = os.path.join(self.outdir, 'correct')
-        if not os.path.exists(correct_dir):
-            os.makedirs(correct_dir)
-        wrong_dir = os.path.join(self.outdir, 'wrong')
-        if not os.path.exists(wrong_dir):
-            os.makedirs(wrong_dir)
-        neutral_dir = os.path.join(self.outdir, 'neutral')
-        if not os.path.exists(neutral_dir):
-            os.makedirs(neutral_dir)
-
-        batch_size = labels_enc.shape[0]
-        for batch_idx in range(batch_size):
-            # print('')
-            # print('batch idx ' + str(batch_idx))
-            name = filenames[batch_idx].decode(sys.getdefaultencoding())
-            mask_match = labels_enc[batch_idx, :, 4]
-            mask_neutral = labels_enc[batch_idx, :, 5]
-            mask_match = mask_match > 0.5
-            mask_neutral = mask_neutral > 0.5
-            mask_negative = np.logical_and(np.logical_not(mask_match), np.logical_not(mask_neutral))
-            box_coords_enc = labels_enc[batch_idx, :, :4]  # (nboxes, 4)
-            box_coords_raw = self.decode_boxes(box_coords_enc)  # (nboxes, 4) # Padded image reference [xmin, ymin, width, height]
-            class_ids = labels_enc[batch_idx, :, 6].astype(np.int32)
-            class_id = class_ids[0] # We only consider one box.
-            predicted_class_id = np.argmax(predictions[batch_idx, 0, :])
-            percent_contained = labels_enc[batch_idx, :, 8]  # (nboxes)
-            crop = self.get_input_crop(batch_idx, 0, inputs_all_sizes)
-            if mask_match[0]:
-                # Box coordinates with repect to the crop (the anchor):
-                box_coords_wrt_anchor_abs = self.box_coords_wrt_padded_2_box_coords_wrt_anchor(box_coords_raw[0, :], 0, True)
-                # Draw the object:
-                cv2.rectangle(crop, (box_coords_wrt_anchor_abs[0], box_coords_wrt_anchor_abs[1]),
-                              (box_coords_wrt_anchor_abs[0] + box_coords_wrt_anchor_abs[2],
-                               box_coords_wrt_anchor_abs[1] + box_coords_wrt_anchor_abs[3]), (0, 0, 255), 2)
-                # Get the predicted and ground truth class names:
-                predicted_class = self.classnames[predicted_class_id]
-                gt_class = self.classnames[class_id]
-                # Check if the prediction is right or wrong:
-                if class_id == predicted_class_id:
-                    image_folder = os.path.join(correct_dir, gt_class)
-                else:
-                    image_folder = os.path.join(wrong_dir, gt_class)
-                if not os.path.exists(image_folder):
-                    os.makedirs(image_folder)
-                # Write crop:
-                pc = int(np.round(percent_contained[0] * 100))
-                if pc < 100:
-                    print('POSITIVE WITH PC ' + str(pc))
-                image_path = os.path.join(image_folder, name + '_predicted_' + predicted_class + '_pc_' + str(pc) + '.png')
-            elif mask_neutral[0]:
-                image_path = os.path.join(neutral_dir, name + '.png')
-            elif mask_negative[0]:
-                # Get the predicted and ground truth class names:
-                predicted_class = self.classnames[predicted_class_id]
-                assert class_id == self.background_id, 'Negative box does not have background class id'
-                gt_class = 'background'
-                # Check if the prediction is right or wrong:
-                if class_id == predicted_class_id:
-                    image_folder = os.path.join(correct_dir, gt_class)
-                else:
-                    image_folder = os.path.join(wrong_dir, gt_class)
-                if not os.path.exists(image_folder):
-                    os.makedirs(image_folder)
-                # Write crop:
-                image_path = os.path.join(image_folder, name + '_predicted_' + predicted_class + '.png')
-            else:
-                raise Exception('Box is not positive, not neutral and not negative.')
-            cv2.imwrite(image_path, cv2.cvtColor(crop.astype(np.uint8), cv2.COLOR_RGB2BGR))
-        return labels2
-
-    def write_input_crops_1grid(self, inputs0, labels, filenames, all_outputs):
-        inputs_all_sizes = [inputs0]
-        labels = self.write_input_crops(inputs_all_sizes, labels, filenames, all_outputs)
-        return labels
-
-    def write_input_crops_2grids(self, inputs0, inputs1, labels, filenames, all_outputs):
-        inputs_all_sizes = [inputs0, inputs1]
-        labels = self.write_input_crops(inputs_all_sizes, labels, filenames, all_outputs)
-        return labels
-
-    def write_input_crops_3grids(self, inputs0, inputs1, inputs2, labels, filenames, all_outputs):
-        inputs_all_sizes = [inputs0, inputs1, inputs2]
-        labels = self.write_input_crops(inputs_all_sizes, labels, filenames, all_outputs)
-        return labels
-
-    def write_net_output(self, softmax, filename, directory):
-        # softmax: (nboxes, nclasses)
-        file_path = os.path.join(directory, filename + '_net_output.csv')
-        print('net_output file path: ' + file_path)
-        with open(file_path, 'w') as fid:
-            for i in range(self.n_boxes):
-                fid.write('\n')
-                fid.write('Box ' + str(i) + '\n')
-                fid.write('softmax: ;')
-                for cl_idx in range(self.nclasses):
-                    fid.write(str(softmax[i, cl_idx]) + ';')
-                fid.write('\n')
-                winning_class = np.argmax(softmax[i, :])
-                classname = self.classnames[winning_class]
-                max_conf = softmax[i, winning_class]
-                fid.write('Winning class: ;' + str(winning_class) + ';' + classname + '\n')
-                fid.write('Max conf: ;' + str(max_conf) + '\n')
-
-    def write_input_crops(self, inputs_all_sizes, labels, filenames, all_outputs):
-        # inputs_all_sizes: list of elements of shape (batch_size, this_input_size, this_input_size, 3)
-        # labels: (batch_size, nboxes, 9)
-        # filenames: (batch_size)
-        # all_outputs: (batch_size, nboxes, ?)
-        # print('write_input_crops')
-
-        net_output_conf, net_output_coords, net_output_pc = CommonEncoding.split_net_output_np(all_outputs, self.opts, self.nclasses)
-        # net_output_conf: (batch_size, nboxes, nclasses)
-        # net_output_coords: (batch_size, nboxes, ?)
-        # net_output_pc: (batch_size, nboxes)
-        if self.opts.box_per_class:
-            # net_output_coords: (batch_size, nboxes, 4 * nclasses)
-            selected_coords = CommonEncoding.get_selected_coords_np(net_output_conf, net_output_coords, self.nclasses, self.opts.box_per_class)  # (batch_size, nboxes, 4)
-            pred_coords_raw = self.decode_boxes(selected_coords)  # (batch_size, nboxes, 4) [xmin, ymin, width, height]
-        else:
-            # net_output_coords: (batch_size, nboxes, 4)
-            pred_coords_raw = self.decode_boxes(net_output_coords)  # (batch_size, nboxes, 4) [xmin, ymin, width, height]
-
-        e_x = np.exp(net_output_conf)  # (batch_size, nboxes, nclasses)
-        softmax = e_x / np.tile(np.sum(e_x, axis=-1, keepdims=True), [1, 1, self.nclasses])  # (batch_size, nboxes)
-
-        batch_size = labels.shape[0]
-        for batch_idx in range(batch_size):
-            name = filenames[batch_idx].decode(sys.getdefaultencoding())
-            # print('image ' + name)
-            mask_match = labels[batch_idx, :, 4]
-            mask_neutral = labels[batch_idx, :, 5]
-            # print('mask_match')
-            # print(mask_match)
-            # print('mask_neutral')
-            # print(mask_neutral)
-            mask_match = mask_match > 0.5
-            mask_neutral = mask_neutral > 0.5
-            mask_negative = np.logical_and(np.logical_not(mask_match), np.logical_not(mask_neutral))
-            class_ids = labels[batch_idx, :, 6]
-            box_coords_enc = labels[batch_idx, :, :4]  # (nboxes, 4)
-            box_coords_raw = self.decode_boxes(box_coords_enc)  # (nboxes, 4) # Padded image reference [xmin, ymin, width, height]
-            # print('n_positives = ' + str(np.sum(mask_match.astype(np.int32))))
-            # print('n_neutrals = ' + str(np.sum(mask_neutral.astype(np.int32))))
-            # print('n_negatives = ' + str(np.sum(mask_negative.astype(np.int32))))
-            # print('box_coords_raw = ' + str(box_coords_raw))
-            image_dir = os.path.join(self.input_crops_dir, name)
-            positives_dir = os.path.join(image_dir, 'positives')
-            negatives_dir = os.path.join(image_dir, 'negatives')
-            neutrals_dir = os.path.join(image_dir, 'neutrals')
-            if not os.path.exists(self.input_crops_dir):
-                os.makedirs(self.input_crops_dir)
-            if not os.path.exists(image_dir):
-                os.makedirs(image_dir)
-            if not os.path.exists(positives_dir):
-                os.makedirs(positives_dir)
-            if not os.path.exists(negatives_dir):
-                os.makedirs(negatives_dir)
-            if not os.path.exists(neutrals_dir):
-                os.makedirs(neutrals_dir)
-            for i in range(len(inputs_all_sizes)):
-                image_grid = inputs_all_sizes[i][batch_idx, :, :, :].copy()
-                image_grid = self.add_mean_again(image_grid)
-                cv2.imwrite(os.path.join(image_dir, 'image_grid' + str(i) + '.png'), cv2.cvtColor(image_grid.astype(np.uint8), cv2.COLOR_RGB2BGR))
-            for position in range(self.n_boxes):
-                # print('position ' + str(position))
-                self.write_net_output(softmax[batch_idx, :, :], name, image_dir)
-                crop = self.get_input_crop(batch_idx, position, inputs_all_sizes)
-                # Save it:
-                if mask_negative[position]:  # negative
-                    image_path = os.path.join(negatives_dir, 'pos_' + str(position) + '_background.png')
-                elif mask_match[position]:  # positive
-                    id_class = int(np.round(class_ids[position]))
-                    image_path = os.path.join(positives_dir, 'pos_' + str(position) + '_class_' + self.classnames[id_class] + '.png')
-                    # Box coordinates with repect to the crop (the anchor):
-                    box_coords_wrt_anchor_abs = self.box_coords_wrt_padded_2_box_coords_wrt_anchor(box_coords_raw[position, :], position, True)
-                    # print('box_coords_wrt_anchor_abs = ' + str(box_coords_wrt_anchor_abs))
-                    # Draw the object:
-                    cv2.rectangle(crop, (box_coords_wrt_anchor_abs[0], box_coords_wrt_anchor_abs[1]),
-                                  (box_coords_wrt_anchor_abs[0] + box_coords_wrt_anchor_abs[2],
-                                   box_coords_wrt_anchor_abs[1] + box_coords_wrt_anchor_abs[3]), (0, 0, 255), 2)
-                else:  # neutral
-                    image_path = os.path.join(neutrals_dir, 'pos_' + str(position) + '_neutral.png')
-                # Prediction coordinates:
-                print()
-                pred_coords_wrt_anchor_abs = self.box_coords_wrt_padded_2_box_coords_wrt_anchor(pred_coords_raw[batch_idx, position, :], position, True)
-                cv2.rectangle(crop, (pred_coords_wrt_anchor_abs[0], pred_coords_wrt_anchor_abs[1]),
-                              (pred_coords_wrt_anchor_abs[0] + pred_coords_wrt_anchor_abs[2],
-                               pred_coords_wrt_anchor_abs[1] + pred_coords_wrt_anchor_abs[3]), (255, 165, 0), 2)
-                image_path = tools.ensure_new_path(image_path)
-                # print('writing for position ' + str(position))
-                cv2.imwrite(image_path, cv2.cvtColor(crop.astype(np.uint8), cv2.COLOR_RGB2BGR))
-        return labels
-
     def box_coords_wrt_padded_2_box_coords_wrt_anchor(self, box_coords_wrt_pad, position, convert_to_abs=False):
         box_xmin_wrt_pad = box_coords_wrt_pad[0]
         box_ymin_wrt_pad = box_coords_wrt_pad[1]
         box_width_wrt_pad = box_coords_wrt_pad[2]
         box_height_wrt_pad = box_coords_wrt_pad[3]
         anchor_xmin_wrt_pad, anchor_ymin_wrt_pad, anchor_xmax_wrt_pad, anchor_ymax_wrt_pad = self.get_anchor_coords_wrt_padded(position)
-        # print('anchor_coords_wrt_padded: ' + str([anchor_xmin_wrt_pad, anchor_ymin_wrt_pad, anchor_xmax_wrt_pad, anchor_ymax_wrt_pad]))
         anchor_width_wrt_pad = anchor_xmax_wrt_pad - anchor_xmin_wrt_pad
         anchor_height_wrt_pad = anchor_ymax_wrt_pad - anchor_ymin_wrt_pad
-        # print('anchor_width_wrt_pad = ' + str(anchor_width_wrt_pad))
-        # print('anchor_height_wrt_pad = ' + str(anchor_height_wrt_pad))
         box_xmin_wrt_anchor = (box_xmin_wrt_pad - anchor_xmin_wrt_pad) / anchor_width_wrt_pad
         box_ymin_wrt_anchor = (box_ymin_wrt_pad - anchor_ymin_wrt_pad) / anchor_height_wrt_pad
         box_width_wrt_anchor = box_width_wrt_pad / anchor_width_wrt_pad
@@ -322,8 +93,7 @@ class MultiCellArch:
             box_coords_wrt_anchor = np.clip(np.round(box_coords_wrt_anchor * network.receptive_field_size).astype(np.int32), 0, network.receptive_field_size - 1)
         return box_coords_wrt_anchor
 
-    def net_on_every_size(self, inputs_all_sizes, labels, filenames):
-
+    def net_on_every_size(self, inputs_all_sizes):
         self.n_boxes = 0
         all_outputs = []
         all_crs = []
@@ -356,78 +126,7 @@ class MultiCellArch:
         print('Maximum absolute pad: ' + str(self.max_pad_abs))
         print('Input image size with pad: ' + str(self.input_image_size_w_pad))
         self.print_grids_info()
-
-        if self.opts.write_crops:
-            inputs0 = inputs_all_sizes[0]
-            inputs1 = inputs_all_sizes[1]
-            inputs2 = inputs_all_sizes[2]
-            labels_shape = labels.shape
-            if len(inputs_all_sizes) == 1:
-                labels = tf.py_func(self.write_input_crops_1grid, [inputs0, labels, filenames, all_outputs], (tf.float32))
-            elif len(inputs_all_sizes) == 2:
-                labels = tf.py_func(self.write_input_crops_2grids, [inputs0, inputs1, labels, filenames, all_outputs], (tf.float32))
-            elif len(inputs_all_sizes) == 3:
-                labels = tf.py_func(self.write_input_crops_3grids, [inputs0, inputs1, inputs2, labels, filenames, all_outputs], (tf.float32))
-            else:
-                raise Exception('Case with len(inputs_all_sizes) > 3 not implemented yet.')
-            labels.set_shape(labels_shape)
-
-        return all_outputs, all_crs, labels  # (batch_size, nboxes, ?)
-
-    def compute_iou_of_two_anchors(self, index1, index2):
-        coords1 = self.anchors_coordinates[index1, :]  # (4)
-        coords2 = self.anchors_coordinates[index2, :]  # (4)
-        iou = compute_iou_multi_dim(coords1, coords2)
-        return iou
-
-    def compare_all_crs(self, all_crs, labels, net_output_conf):
-        # all_crs: (batch_size, nboxes, lcr)
-        # labels: (batch_size, nboxes, 9)
-        # net_output_conf: (batch_size, nboxes, nclasses)
-        print('Making operations to compare CRs...')
-        with tf.variable_scope('cr_comparison'):
-            nearest_valid_gt_idx = labels[:, :, 7]  # (batch_size, nboxes)
-            softmax = tf.nn.softmax(net_output_conf, axis=-1)  # (batch_size, nboxes, nclasses)
-            max_softmax = tf.reduce_max(softmax, axis=-1)  # (batch_size, nboxes)
-            self.comparisons_map = {}
-            count = 0
-            left_crs = []
-            right_crs = []
-            left_gt_idx = []
-            right_gt_idx = []
-            left_max_softmax = []
-            right_max_softmax = []
-            for i in range(self.n_boxes):
-                for j in range(i + 1, self.n_boxes):
-                    # We could set here some condition in order to compare only some boxes (IOU for instance).
-                    if self.compute_iou_of_two_anchors(i, j) > self.opts.min_iou_to_compare:
-                        left_crs.append(all_crs[:, i, :])  # (batch_size, lcr)
-                        right_crs.append(all_crs[:, j, :])  # (batch_size, lcr)
-                        left_gt_idx.append(nearest_valid_gt_idx[:, i])  # (batch_size)
-                        right_gt_idx.append(nearest_valid_gt_idx[:, j])  # (batch_size)
-                        left_max_softmax.append(max_softmax[:, i])  # (batch_size)
-                        right_max_softmax.append(max_softmax[:, j])  # (batch_size)
-                        self.comparisons_map[count] = [i, j]
-                        count += 1
-            self.n_comparisons = count
-            print('Number of comparisons: ' + str(self.n_comparisons))
-            print('Number of maximum possible comparisons: ' + str(int(scipy.misc.comb(self.n_boxes, 2))))
-            assert self.n_comparisons > 0, 'Number of comparison must be greater than 0.'
-            left_crs = tf.stack(left_crs, axis=1)  # (batch_size, n_comparisons, lcr)
-            right_crs = tf.stack(right_crs, axis=1)  # (batch_size, n_comparisons, lcr)
-            left_gt_idx = tf.stack(left_gt_idx, axis=-1)  # (batch_size, n_comparisons)
-            right_gt_idx = tf.stack(right_gt_idx, axis=-1)  # (batch_size, n_comparisons)
-            left_max_softmax = tf.stack(left_max_softmax, axis=-1)  # (batch_size, n_comparisons)
-            right_max_softmax = tf.stack(right_max_softmax, axis=-1)  # (batch_size, n_comparisons)
-            comparison_label = tf.less(tf.abs(left_gt_idx - right_gt_idx), 0.5)  # (batch_size, n_comparisons), bool
-            subtraction = tf.abs(left_crs - right_crs)  # (batch_size, n_comparisons, lcr)
-            subtraction = tf.expand_dims(subtraction, axis=2)  # (batch_size, n_comparisons, 1, lcr)
-            fc1 = slim.conv2d(subtraction, self.opts.lcr, [1, 1], scope='fc1')  # (batch_size, n_comparisons, 1, lcr)
-            comparison_pred = slim.conv2d(fc1, 2, [1, 1], scope='fc2', activation_fn=None)  # (batch_size, n_comparisons, 1, 2)
-            comparison_pred = tf.squeeze(comparison_pred, axis=2)  # (batch_size, n_comparisons, 2)
-            comp_conf1_wins = left_max_softmax > right_max_softmax  # (batch_size, n_comparisons)
-        print('Operations to compare CRs ready.')
-        return comparison_pred, comparison_label, comp_conf1_wins
+        return all_outputs, all_crs  # (batch_size, nboxes, ?)
 
 
     def print_grids_info(self):
@@ -452,61 +151,11 @@ class MultiCellArch:
         print('')
         print('Total number of boxes: ' + str(self.n_boxes))
 
-    def make(self, inputs, labels, filenames):
+    def make(self, inputs):
         inputs_all_sizes = self.make_input_multiscale(inputs)
-        net_output, all_crs, labels2 = self.net_on_every_size(inputs_all_sizes, labels, filenames)  # (batch_size, nboxes, ?)
+        net_output, all_crs = self.net_on_every_size(inputs_all_sizes)  # (batch_size, nboxes, ?)
         self.compute_anchors_coordinates()
-
-        net_output_conf, net_output_coords, net_output_pc = CommonEncoding.split_net_output_tf(net_output, self.opts, self.nclasses)
-
-        if self.opts.compare_boxes:
-            comparison_pred, comparison_label, comp_conf1_wins = self.compare_all_crs(all_crs, labels, net_output_conf)
-        else:
-            comparison_pred = None
-            comparison_label = None
-            comp_conf1_wins = None
-
-        if self.opts.write_crops:
-            inputs0 = inputs_all_sizes[0]
-            labels2_shape = labels2.shape
-            labels2 = tf.py_func(self.write_predictions, [inputs0, labels, net_output_conf, filenames, net_output, labels2], (tf.float32))
-            labels2.set_shape(labels2_shape)
-
-        loss = self.make_loss(labels2, net_output, filenames, comparison_pred, comparison_label)
-
-        if self.opts.compare_boxes:
-            predictions = self.remove_repeated_predictions(net_output_conf, net_output_coords, net_output_pc, comparison_pred, comp_conf1_wins)
-        else:
-            predictions = net_output
-
-        return predictions, loss
-
-    def remove_repeated_predictions(self, net_output_conf, net_output_coords, net_output_pc, comparison_pred, comp_conf1_wins):
-        # net_output: (batch_size, nboxes, ?)
-        # net_output_conf: (batch_size, nboxes, nclasses)
-        # comparison_pred: (batch_size, n_comparisons, 2)
-        # comp_conf1_wins: (batch_size, n_comparisons)
-        print('Setting operations to remove repeated predictions...')
-        batch_size = tf.shape(net_output_conf)[0]
-        background_conf = tf.concat([tf.zeros(shape=(batch_size, self.n_boxes, self.nclasses - 1), dtype=tf.float32),
-                                     tf.ones(shape=(batch_size, self.n_boxes, 1), dtype=tf.float32)], axis=-1)
-        predicted_same = comparison_pred[:, :, 1] > comparison_pred[:, :, 0]  # (batch_size, n_comparisons), bool
-        all_masks = []
-        for i in range(self.n_boxes):
-            all_masks.append(tf.zeros((batch_size), tf.bool))
-        for comp_idx in range(self.n_comparisons):
-            index1 = self.comparisons_map[comp_idx][0]
-            index2 = self.comparisons_map[comp_idx][1]
-            supress_1 = tf.logical_and(predicted_same[:, comp_idx], tf.logical_not(comp_conf1_wins[:, comp_idx]))  # (batch_size)
-            supress_2 = tf.logical_and(predicted_same[:, comp_idx], comp_conf1_wins[:, comp_idx])  # (batch_size)
-            all_masks[index1] = tf.logical_or(all_masks[index1], supress_1)
-            all_masks[index2] = tf.logical_or(all_masks[index2], supress_2)
-        supression_mask = tf.stack(all_masks, axis=-1)  # (batch_size, nboxes)
-        supression_mask = tf.tile(tf.expand_dims(supression_mask, axis=-1), [1, 1, self.nclasses])  # (batch_size, nboxes, nclasses)
-        net_output_conf_mod = tf.where(supression_mask, background_conf, net_output_conf)
-        predictions = CommonEncoding.put_together_net_output(net_output_conf_mod, net_output_coords, net_output_pc, self.opts, self.nclasses)
-        print('Operations to remove repeated predictions ready.')
-        return predictions
+        return net_output, all_crs
 
     def get_grid_idx_from_flat_position(self, position):
         limit = 0
@@ -563,156 +212,6 @@ class MultiCellArch:
             ymax = min(int(np.round(ymax * self.input_image_size_w_pad)), self.input_image_size_w_pad)
         return xmin, ymin, xmax, ymax
 
-    def compute_indices_to_select_coords_and_pc(self, net_output_conf):
-        # net_output_coords: (batch_size, nboxes, nclasses)
-        # batch_size = net_output_conf.shape[0]
-        batch_size = tf.shape(net_output_conf)[0]
-        indices = tf.cast(tf.argmax(net_output_conf, axis=-1), tf.int32)  # (batch_size, nboxes)
-        indices_mesh = tf.stack(tf.meshgrid(tf.range(0, self.n_boxes), tf.range(0, batch_size)) + [indices], axis=2)  # (batch_size, nboxes, 3)
-        print('indices_mesh: ' + str(indices_mesh))
-        return indices_mesh
-
-    def compute_localization_and_pc_losses(self, mask_match, labels_enc, net_output_conf, net_output_coords, net_output_pc, n_positives, zeros):
-        # mask_match: (batch_size, nboxes)
-        gt_pc_ass = labels_enc[:, :, 8]  # (batch_size, nboxes)
-        gt_coords = labels_enc[:, :, :4]  # (batch_size, nboxes, 4)
-        if self.opts.box_per_class:
-            # net_output_coords: (batch_size, nboxes, 4 * nclasses)
-            # [dcx_enc_cl1, dcx_enc_cl2, ..., dcy_enc_cl1, dcy_enc_cl2, ..., w_enc_cl1, w_enc_cl2, ..., h_enc_cl1, h_enc_cl2, ...]
-            indices_mesh = self.compute_indices_to_select_coords_and_pc(net_output_conf)
-            selected_coords = CommonEncoding.get_selected_coords_tf(indices_mesh, net_output_coords, self.nclasses)  # (batch_size, nboxes, 4)
-
-            localization_loss = CommonEncoding.smooth_L1_loss(gt_coords, selected_coords)  # (batch_size, nboxes)
-            # print('localization_loss = ' + str(localization_loss))
-
-            if self.opts.predict_pc:
-                # net_output_pc: (batch_size, nboxes, nclasses)
-                selected_pc = tf.gather_nd(net_output_pc, indices_mesh)  # (batch_size, nboxes)
-                pc_loss = CommonEncoding.smooth_L1_loss(gt_pc_ass, selected_pc, False)  # (batch_size, nboxes)
-        else:
-            # pred_cords: (batch_size, nboxes, 4)
-            localization_loss = CommonEncoding.smooth_L1_loss(gt_coords, net_output_coords)  # (batch_size, nboxes)
-            # print('localization_loss = ' + str(localization_loss))
-
-            if self.opts.predict_pc:
-                # net_output_pc: (batch_size, nboxes)
-                pc_loss = CommonEncoding.smooth_L1_loss(gt_pc_ass, net_output_pc, False)  # (batch_size, nboxes)
-
-        # localization_loss_matches = tf.reduce_sum(localization_loss * mask_match, axis=-1)  # (batch_size)
-        localization_loss_matches = tf.where(mask_match, localization_loss, zeros, name='loc_loss_match')  # (batch_size)
-        loss_loc_scaled = tf.divide(localization_loss_matches, tf.maximum(tf.cast(n_positives, tf.float32), 1), name='loss_loc_scaled')
-        loss_loc = tf.reduce_sum(loss_loc_scaled, name='loss_loc')
-
-        if self.opts.predict_pc:
-            # pc_loss_matches = tf.reduce_sum(pc_loss * mask_match, axis=-1)  # (batch_size)
-            pc_loss_matches = tf.where(mask_match, pc_loss, zeros, name='pc_loss_match')  # (batch_size)
-            loss_pc_scaled = tf.divide(pc_loss_matches, tf.maximum(tf.cast(n_positives, tf.float32), 1), name='loss_pc_scaled')
-            loss_pc = tf.reduce_sum(loss_pc_scaled, name='loss_pc')
-            return loss_loc, loss_pc
-        else:
-            return loss_loc
-
-    def compute_conf_loss(self, mask_match, mask_neutral, net_output_conf, labels, n_positives, zeros):
-
-        loss_orig = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=net_output_conf, name='loss_orig')
-        # loss_orig = tf.Print(loss_orig, [tf.reduce_sum(loss_orig)], 'loss_orig')
-        # loss_pos = mask_match * loss_orig
-        loss_pos = tf.where(mask_match, loss_orig, zeros, name='loss_pos')
-        # loss_pos = tf.Print(loss_pos, [tf.reduce_sum(loss_pos)], 'loss_pos')
-
-        # mask_match = tf.Print(mask_match, [n_positives], 'n_positives')
-        # mask_neutral = tf.Print(mask_neutral, [n_neutrals], 'n_neutrals')
-        mask_negatives = tf.logical_and(tf.logical_not(mask_match, name='not_mask_match'), tf.logical_not(mask_neutral, name='not_mask_neutral'), name='mask_negatives')
-        n_negatives = tf.reduce_sum(tf.cast(mask_negatives, tf.int32, name='mask_negatives_int32'), name='n_negatives')
-        # mask_negatives = tf.Print(mask_negatives, [n_negatives], 'n_negatives')
-        # loss_neg = mask_negatives * loss_orig
-        loss_neg = tf.where(mask_negatives, loss_orig, zeros, name='loss_neg')
-        # loss_neg = tf.Print(loss_neg, [tf.reduce_sum(loss_neg)], 'loss_neg')
-
-        loss_pos_scaled = tf.divide(loss_pos, tf.maximum(tf.cast(n_positives, tf.float32, name='n_positives_float32'), 1, name='max_n_positives_1'), name='loss_pos_scaled')
-        loss_neg_scaled = tf.divide(loss_neg, tf.maximum(tf.cast(n_negatives, tf.float32, name='n_negatives_float32'), 1, name='max_n_negatives_1'), name='loss_neg_scaled')
-        # loss_pos_scaled = tf.Print(loss_pos_scaled, [tf.reduce_sum(loss_pos_scaled)], 'loss_pos_scaled')
-        # loss_neg_scaled = tf.Print(loss_neg_scaled, [tf.reduce_sum(loss_neg_scaled)], 'loss_neg_scaled')
-        # tf.summary.scalar("loss_pos_scaled", loss_pos_scaled)
-        # tf.summary.scalar("loss_neg_scaled", loss_neg_scaled)
-
-        loss_conf = tf.reduce_sum(loss_pos_scaled + loss_neg_scaled, name='loss_conf')
-
-        return loss_conf
-
-    def comparison_loss(self, comparison_pred, comparison_label):
-        # comparison_pred: (batch_size, n_comarisons, 2)
-        # comparison_pred: (batch_size, n_comarisons)
-        comparison_label_int = tf.cast(comparison_label, tf.int32)
-        comp_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=comparison_label_int, logits=comparison_pred, name='comp_loss_orig')
-        comp_loss = tf.reduce_mean(comp_loss) * self.opts.comp_loss_factor
-        return comp_loss
-
-    def make_loss(self, labels_enc, net_output, filenames, comparison_pred, comparison_label):
-        # Inputs:
-        #     encoded_labels: numpy array of dimension (batch_size, nboxes x 9), being nboxes the total number of anchor boxes.
-        #                     The second dimension is like follows: First the 4 encoded coordinates of the bounding box,
-        #                     then a flag indicating if it matches a ground truth box or not, another flag inidicating
-        #                     if it is a neutral box, the class id, the ground truth box id associated with, and then
-        #                     the maximum percent contained (or the percent contained of the associated gt box)
-        print('Defining loss...')
-        with tf.name_scope('myloss'):
-            mask_match = labels_enc[:, :, 4]  # (batch_size, nboxes)
-            mask_neutral = labels_enc[:, :, 5]  # (batch_size, nboxes)
-            gt_class_ids = labels_enc[:, :, 6]  # (batch_size, nboxes)
-            nearest_valid_gt_idx = labels_enc[:, :, 7]  # (batch_size, nboxes)
-
-            net_output_conf, net_output_coords, net_output_pc = CommonEncoding.split_net_output_tf(net_output, self.opts, self.nclasses)
-
-            labels = tf.cast(tf.round(gt_class_ids, name='round_gt_class_ids'), tf.int32, name='labels_int32')
-
-            mask_match = tf.greater(mask_match, 0.5, name='mask_match')
-            mask_neutral = tf.greater(mask_neutral, 0.5, name='mask_neutral')
-
-            n_positives = tf.reduce_sum(tf.cast(mask_match, tf.int32, name='mask_match_int32'), name='n_positives')
-            n_neutrals = tf.reduce_sum(tf.cast(mask_neutral, tf.int32, name='mask_neutral_int32'), name='n_neutrals')
-
-            zeros = tf.zeros(shape=tf.shape(mask_match, name='mask_match_shape'), dtype=tf.float32, name='zeros_mask')
-
-            # Confidence loss:
-            loss_conf = self.compute_conf_loss(mask_match, mask_neutral, net_output_conf, labels, n_positives, zeros)
-            tf.summary.scalar("loss_conf", loss_conf)
-            # print('loss_conf')
-            # print(loss_conf)
-
-            # loss_conf = tf.Print(loss_conf, [loss_conf], 'loss_conf')
-
-            total_loss = loss_conf
-
-            if self.opts.predict_coordinates:
-                if self.opts.predict_pc:
-                    loc_loss, pc_loss = self.compute_localization_and_pc_losses(mask_match, labels_enc,
-                                                                net_output_conf, net_output_coords,
-                                                                net_output_pc, n_positives, zeros)
-                    tf.summary.scalar("loc_loss", loc_loss)
-                    tf.summary.scalar("pc_loss", pc_loss)
-                    # loc_loss = tf.Print(loc_loss, [loc_loss], 'loc_loss')
-                    # pc_loss = tf.Print(pc_loss, [pc_loss], 'pc_loss')
-                    total_loss += loc_loss * self.opts.loc_loss_factor
-                    total_loss += pc_loss * self.opts.pc_loss_factor
-                else:
-                    loc_loss = self.compute_localization_and_pc_losses(mask_match, labels_enc,
-                                                    net_output_conf, net_output_coords,
-                                                    net_output_pc, n_positives, zeros)
-                    tf.summary.scalar("loc_loss", loc_loss)
-                    # loc_loss = tf.Print(loc_loss, [loc_loss], 'loc_loss')
-                    total_loss += loc_loss * self.opts.loc_loss_factor
-
-            if self.opts.compare_boxes:
-                loss_comp = self.comparison_loss(comparison_pred, comparison_label)
-                tf.summary.scalar("loss_comp", loss_comp)
-                total_loss += loss_comp
-
-            tf.summary.scalar("total_loss", total_loss)
-
-        print('Loss defined.')
-        return total_loss
-
     def remove_padding_from_gt(self, gt_boxes, clip=True):
         unpadded_gt_boxes = []
         for box in gt_boxes:
@@ -727,7 +226,7 @@ class MultiCellArch:
         coords_pad[..., 2:] = coords_orig[..., 2:] * (1 - 2 * self.max_pad_rel)
         return coords_pad
 
-    def encode_gt(self, gt_boxes, filename):
+    def encode_gt(self, gt_boxes):
         # Inputs:
         #     gt_boxes: List of GroundTruthBox objects, with relative coordinates (between 0 and 1)
         # Outputs:
@@ -739,9 +238,6 @@ class MultiCellArch:
         #
         # We don't consider the batch dimension here.
         n_gt = len(gt_boxes)
-
-        filename_dec = filename.decode(sys.getdefaultencoding())
-        # print(filename_dec)
 
         if n_gt > 0:
             gt_vec = np.zeros(shape=(n_gt, 4), dtype=np.float32)
@@ -756,8 +252,6 @@ class MultiCellArch:
             # Convert bounding boxes coordinates from the original representation, to the representation in the padded image:
             gt_vec = self.coords_orig2pad(gt_vec)
 
-            # gt_vec = tf.Print(gt_vec, [tf.shape(gt_vec)], 'tf.shape(gt_vec)')
-
             pc, ar, dc = self.compute_pc_ar_dc(gt_vec)  # All variables have shape (n_gt, n_boxes)
 
             gt_pc_incoming_exp = np.expand_dims(gt_pc_incoming, axis=1)  # (n_gt, 1)
@@ -771,11 +265,8 @@ class MultiCellArch:
             mask_thresholds = mask_ar & mask_pc & mask_dc  # (n_gt, n_boxes)
             mask_match = np.any(mask_thresholds, axis=0)  # (n_boxes)
 
-            # mask_thresholds = tf.Print(mask_thresholds, [tf.shape(mask_thresholds)], 'tf.shape(mask_thresholds)')
-
             dc_masked = np.where(mask_thresholds, dc, np.infty * np.ones(shape=(n_gt, self.n_boxes), dtype=np.float32) ) # (n_gt, n_boxes)
 
-            # dc_masked = tf.Print(dc_masked, [tf.shape(dc_masked)], 'tf.shape(dc_masked)')
             nearest_valid_gt_idx = np.argmin(dc_masked, axis=0)  # (n_boxes)
 
             # Neutral boxes:
@@ -805,21 +296,13 @@ class MultiCellArch:
                 else:
                     pc_associated[i] = np.max(pc[:, i])
 
-            if self.opts.write_pc_ar_dc:
-                self.write_pc_ar_dc_pcass(pc, ar, dc, pc_associated, filename_dec)
-
-            # if (np.abs(pc_associated - 1) < 1e-4):
-            #     print('pc_associated = ' + str(pc_associated))
-            # pc_associated_enc = logit(pc_associated)
-            pc_associated_enc = pc_associated
-
             # Put all together in one array:
             labels_enc = coordinates_enc  # (nboxes, 4)
             labels_enc = np.concatenate((labels_enc, np.expand_dims(mask_match.astype(np.float32), axis=1)), axis=1)  # (n_boxes, 5)  pos 4
             labels_enc = np.concatenate((labels_enc, np.expand_dims(mask_neutral.astype(np.float32), axis=1)), axis=1)  # (n_boxes, 6)  pos 5
             labels_enc = np.concatenate((labels_enc, np.expand_dims(class_ids.astype(np.float32), axis=1)), axis=1)  # (n_boxes, 7)  pos 6
             labels_enc = np.concatenate((labels_enc, np.expand_dims(nearest_valid_gt_idx.astype(np.float32), axis=1)), axis=1)  # (n_boxes, 8)  pos 7
-            labels_enc = np.concatenate((labels_enc, np.expand_dims(pc_associated_enc, axis=1)), axis=1)  # (n_boxes, 9)  pos 8
+            labels_enc = np.concatenate((labels_enc, np.expand_dims(pc_associated, axis=1)), axis=1)  # (n_boxes, 9)  pos 8
 
         else:
             labels_enc = np.zeros(shape=(self.n_boxes, 9), dtype=np.float32)
@@ -1109,101 +592,6 @@ class MultiCellArch:
         dc = np.minimum(dc, np.sqrt(2.0))
 
         return pc, ar, dc
-
-    def compute_repeated_preds_metric(self, predictions, labels_enc):
-        # predictions: (batch_size, nboxes, ?)
-        # labels_enc: (batch_size, nboxes, 9)
-        batch_size = labels_enc.shape[0]
-        n_repetitions = 0
-        n_gt = 0
-        for b in range(batch_size):
-            net_output_nobatch = predictions[b, ...]  # (nboxes, ?)
-            net_output_conf, net_output_coords, net_output_pc = CommonEncoding.split_net_output_np(net_output_nobatch, self.opts, self.nclasses)
-            # net_output_conf: (nboxes, nclasses)
-            nearest_valid_gt_idx = labels_enc[b, :, 7]  # (nboxes)
-            winning_class = np.argmax(net_output_conf, axis=-1)  # (nboxes)
-            is_background = np.less(np.abs(winning_class - self.background_id), 0.5)  # (nboxes)
-            gt_count = {}
-            for i in range(self.n_boxes):
-                if nearest_valid_gt_idx[i] in gt_count:
-                    if not is_background[i]:
-                        gt_count[nearest_valid_gt_idx[i]] += 1
-                        n_repetitions += 1
-                else:
-                    n_gt += 1
-                    if not is_background[i]:
-                        gt_count[nearest_valid_gt_idx[i]] = 1
-        # proportion_repetitions = float(n_repetitions) / n_gt
-        proportion_repetitions = float(n_repetitions) / (self.n_boxes * batch_size)
-        metric_repetitions = 1 - proportion_repetitions
-        return metric_repetitions
-
-    def compute_class_accuracy(self, net_output, labels_enc):
-        # net_output: (batch_size, nboxes, ?)
-        # labels_enc: (batch_size, nboxes, 9)
-        n_hits = 0
-        batch_size = labels_enc.shape[0]
-        for b in range(batch_size):
-            net_output_nobatch = net_output[b, ...]  # (nboxes, ?)
-            net_output_conf, net_output_coords, net_output_pc = CommonEncoding.split_net_output_np(net_output_nobatch, self.opts, self.nclasses)
-            # net_output_conf: (nboxes, nclasses)
-            hits = np.abs(np.argmax(net_output_conf, axis=-1) - labels_enc[b, :, 6]) < 0.5
-            n_hits += np.sum(hits.astype(np.int32))
-        n_attemps = batch_size * self.n_boxes
-        accuracy = float(n_hits) / n_attemps
-        return accuracy
-
-    def compute_iou_metric(self, net_output, labels_enc):
-        # net_output: (batch_size, nboxes, ?)
-        # labels_enc: (batch_size, nboxes, 9)
-        mask_match = labels_enc[:, :, 4]  # (batch_size, nboxes)
-        gt_class_ids = np.round(labels_enc[:, :, 6]).astype(np.int32)  # (batch_size, nboxes)
-        net_output_conf, net_output_coords, net_output_pc = CommonEncoding.split_net_output_np(net_output, self.opts, self.nclasses)
-        selected_coords = CommonEncoding.get_selected_coords_np(net_output_conf, net_output_coords, self.nclasses, self.opts.box_per_class)  # (batch_size, nboxes, 4)
-        pred_class_ids = np.argmax(net_output_conf, axis=-1)  # (batch_size, nboxes)
-        mask_TP = np.equal(gt_class_ids, pred_class_ids) * mask_match  # (batch_size, nboxes)
-        n_matches = np.sum(mask_TP)  # ()
-        if n_matches > 0.5:
-            pred_coords = self.decode_boxes_w_batch_size(selected_coords)  # (batch_size, nboxes, 4) [xmin, ymin, width, height]
-            gt_coords = self.decode_boxes_w_batch_size(labels_enc[:, :, :4])  # (batch_size, nboxes, 4) [xmin, ymin, width, height]
-            iou = compute_iou_multi_dim(gt_coords, pred_coords)  # (batch_size, nboxes)
-            iou_on_match = mask_TP * iou  # (batch_size, nboxes)
-            mean_iou = np.sum(iou_on_match) / n_matches  # ()
-            # for i in range(iou.shape[0]):
-            #     if mask_match[i, 0] > 0.5:
-            #         print(iou[i, 0])
-            # print('compute_iou_metric: ' + str(mean_iou))
-        else:
-            mean_iou = None
-            # print('compute_iou_metric: None')
-        return mean_iou
-
-    def write_pc_ar_dc_pcass(self, pc, ar, dc, pc_associated, filename):
-        n_gt = pc.shape[0]
-        if not os.path.exists(self.input_crops_dir):
-            os.makedirs(self.input_crops_dir)
-        file_path = os.path.join(self.input_crops_dir, filename + '_pc_ar_dc_pcass.csv')
-        print('pc_ar_dc_pcass file path: ' + file_path)
-        with open(file_path, 'w') as fid:
-            for i in range(self.n_boxes):
-                fid.write('\n')
-                fid.write('Box ' + str(i) + '\n')
-                fid.write('pc: ')
-                for j in range(n_gt):
-                    fid.write(';' + str(pc[j, i]))
-                fid.write('\n')
-                fid.write('ar: ')
-                for j in range(n_gt):
-                    fid.write(';' + str(ar[j, i]))
-                fid.write('\n')
-                fid.write('dc: ')
-                for j in range(n_gt):
-                    fid.write(';' + str(dc[j, i]))
-                fid.write('\n')
-                fid.write('pc_associated: ')
-                fid.write(';' + str(pc_associated[i]) + '\n')
-
-
 
 
 def compute_iou_multi_dim(boxes1, boxes2):

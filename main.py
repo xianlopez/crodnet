@@ -93,7 +93,7 @@ def common_stuff(inline_args):
 
     # Create experiment folder:
     if args.experiments_folder[0] == '.':  # Relative path
-        args.experiments_folder = tools.join_paths(os.getcwd(), args.experiments_folder[2:])
+        args.experiments_folder = os.path.join(os.getcwd(), args.experiments_folder[2:])
     args.outdir = tools.create_experiment_folder(args)
     # Configure logger:
     tools.configure_logging(args)

@@ -16,8 +16,8 @@ class SingleCellArch:
         self.background_id = self.nclasses - 1
         self.n_labels = 9
         self.batch_size = self.opts.n_images_per_batch * self.opts.n_crops_per_image
-        self.n_metrics = 3
         self.metric_names = ['accuracy_conf', 'iou_mean', 'accuracy_comp']
+        self.n_metrics = len(self.metric_names)
         self.outdir = outdir
         self.classnames = None
         assert self.opts.n_images_per_batch >= 2, 'n_images_per_batch must be at least 2.'
@@ -158,78 +158,6 @@ class SingleCellArch:
         input_shape = [network.receptive_field_size, network.receptive_field_size]
         return input_shape
 
-    def encode_gt(self, gt_boxes):
-        # Inputs:
-        #     gt_boxes: List of GroundTruthBox objects, with relative coordinates (between 0 and 1)
-        # Outputs:
-        #     encoded_labels: (n_labels)
-        #
-        # We don't consider the batch dimension here.
-        n_gt = len(gt_boxes)
-
-        if n_gt > 0:
-            gt_vec = np.zeros(shape=(n_gt, 4), dtype=np.float32)
-            gt_class_ids = np.zeros(shape=(n_gt), dtype=np.int32)
-            gt_pc_incoming = np.zeros(shape=(n_gt), dtype=np.float32)
-            for gt_idx in range(n_gt):
-                gt_vec[gt_idx, :] = gt_boxes[gt_idx].get_coords()
-                # Take into account padding:
-                gt_class_ids[gt_idx] = gt_boxes[gt_idx].classid
-                gt_pc_incoming[gt_idx] = gt_boxes[gt_idx].pc
-
-            ar, dc = compute_ar_dc(gt_vec)  # All variables have shape (n_gt)
-            pc = gt_pc_incoming  # (n_gt)
-
-            # Positive boxes:
-            mask_ar = ar > self.opts.threshold_ar  # (n_gt)
-            mask_pc = pc > self.opts.threshold_pc  # (n_gt)
-            mask_dc = dc < self.opts.threshold_dc  # (n_gt)
-            mask_thresholds = mask_ar & mask_pc & mask_dc  # (n_gt)
-            any_match = np.any(mask_thresholds)  # ()
-
-            dc_masked = np.where(mask_thresholds, dc, np.infty * np.ones(shape=(n_gt), dtype=np.float32) ) # (n_gt)
-
-            nearest_valid_gt_idx = np.argmin(dc_masked)  # ()
-
-            # Neutral boxes:
-            mask_ar_neutral = ar > self.opts.threshold_ar_neutral  # (n_gt)
-            mask_pc_neutral = pc > self.opts.threshold_pc_neutral  # (n_gt)
-            mask_dc_neutral = dc < self.opts.threshold_dc_neutral  # (n_gt)
-            mask_thresholds_neutral = mask_ar_neutral & mask_pc_neutral & mask_dc_neutral  # (n_gt)
-            any_neutral = np.any(mask_thresholds_neutral, axis=0)  # ()
-            is_neutral = np.logical_and(any_neutral, np.logical_not(any_match))  # ()
-
-            # Get the coordinates and the class id of the gt box matched:
-            coordinates = gt_vec[nearest_valid_gt_idx, :]  # (4)
-            coordinates_enc = encode_boxes_np(coordinates, self.opts)  # (4)
-            class_id = gt_class_ids[nearest_valid_gt_idx]
-
-            # Negative boxes:
-            is_negative = np.logical_and(np.logical_not(any_match), np.logical_not(is_neutral))  # ()
-            if is_negative:
-                class_id = self.background_id
-
-            # Percent contained associated with each anchor box.
-            # This is the PC of the assigned gt box, if there is any, or otherwise the maximum PC it has.
-            if any_match:
-                pc_associated = pc[nearest_valid_gt_idx]
-            else:
-                pc_associated = np.max(pc)
-
-            # Put all together in one array:
-            labels_enc = np.stack([any_match.astype(np.float32),
-                                   is_neutral.astype(np.float32),
-                                   class_id.astype(np.float32),
-                                   nearest_valid_gt_idx.astype(np.float32),
-                                   pc_associated])
-            labels_enc = np.concatenate([coordinates_enc, labels_enc])  # (9)
-
-        else:
-            labels_enc = np.zeros(shape=(9), dtype=np.float32)
-            labels_enc[6] = self.background_id
-
-        return labels_enc
-
     def encode_gt_from_array(self, gt_boxes):
         # gt_boxes: (n_gt, 6) [class_id, xmin, ymin, width, height, pc]
         n_gt = gt_boxes.shape[0]
@@ -290,59 +218,6 @@ class SingleCellArch:
             labels_enc[6] = self.background_id
 
         return labels_enc  # (9)
-
-    def decode_gt(self, labels_enc, remove_duplicated=True):
-        # Inputs:
-        #     labels_enc: numpy array of dimension (9).
-        #     remove_duplicated: Many default boxes can be assigned to the same ground truth box. Therefore,
-        #                        when decoding, we can find several times the same box. If we set this to True, then
-        #                        the dubplicated boxes are deleted.
-        # Outputs:
-        #     gt_boxes: List of BoundingBox objects, with relative coordinates (between 0 and 1)
-        #
-        # We don't consider the batch dimension here.
-        gt_boxes = []
-        coords_enc = labels_enc[:4]  # (4)
-        coords_raw = decode_boxes_np(coords_enc, self.opts)  # (4)
-        if labels_enc[4] > 0.5:
-            classid = int(np.round(labels_enc[6]))
-            percent_contained = np.clip(labels_enc[8], 0.0, 1.0)
-            gtbox = BoundingBox(coords_raw, classid, percent_contained)
-            gt_boxes.append(gtbox)
-        return gt_boxes
-
-    def decode_preds(self, net_output_nobatch, th_conf):
-        # Inputs:
-        #     net_output_nobatch: numpy array of dimension nboxes x 9.
-        # Outputs:
-        #     predictions: List of PredictedBox objects, with relative coordinates (between 0 and 1)
-        #
-        # We don't consider the batch dimension here.
-
-        net_output_conf, net_output_coords, net_output_pc = CommonEncoding.split_net_output_np(net_output_nobatch, self.opts, self.nclasses)
-        # net_output_conf: (nclasses)
-        # net_output_coords: (?)
-        # net_output_pc: (?)
-        if self.opts.box_per_class:
-            # net_output_coords: (4 * nclasses)
-            selected_coords = CommonEncoding.get_selected_coords_np(net_output_conf, net_output_coords, self.nclasses, self.opts.box_per_class)  # (4)
-            pred_coords_raw = decode_boxes_np(selected_coords, self.opts)  # (4) [xmin, ymin, width, height]
-        else:
-            # net_output_coords: (4)
-            pred_coords_raw = decode_boxes_np(net_output_coords, self.opts)  # (4) [xmin, ymin, width, height]
-        class_id = np.argmax(net_output_conf)  # ()
-        predictions = []
-        if class_id != self.background_id:
-            gtbox = PredictedBox(pred_coords_raw, class_id, net_output_conf[class_id])
-            if self.opts.predict_pc:
-                if self.opts.box_per_class:
-                    # net_output_pc: (nboxes, nclasses)
-                    gtbox.pc = net_output_pc[class_id]
-                else:
-                    # net_output_pc: (nboxes)
-                    gtbox.pc = net_output_pc
-            predictions.append(gtbox)
-        return predictions
 
     def write_train_debug_info(self, metrics, inputs_reord, labels_enc_reord, loc_and_classif, comparisons_pred, comparisons_labels, comparisons_indices, filenames):
         # inputs_reord: (batch_size, input_image_size, input_image_size, 3)

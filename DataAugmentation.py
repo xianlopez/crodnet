@@ -33,7 +33,7 @@ class DataAugOpts:
 
 
 class DataAugmentation:
-    def __init__(self, args, input_width, input_height):
+    def __init__(self, opts, input_width, input_height):
         self.input_width = input_width
         self.input_height = input_height
         self.data_aug_opts = args.data_aug_opts
