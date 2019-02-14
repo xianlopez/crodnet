@@ -36,10 +36,10 @@ class DataAugmentation:
     def __init__(self, opts, input_width, input_height):
         self.input_width = input_width
         self.input_height = input_height
-        self.data_aug_opts = args.data_aug_opts
-        self.outdir = args.outdir
+        self.data_aug_opts = opts.data_aug_opts
+        self.outdir = opts.outdir
         self.write_image_after_data_augmentation = self.data_aug_opts.write_image_after_data_augmentation
-        if args.num_workers > 1 and self.data_aug_opts.write_image_after_data_augmentation:
+        if opts.num_workers > 1 and self.data_aug_opts.write_image_after_data_augmentation:
             raise Exception('Option write_image_after_data_augmentation is not compatible with more than one worker to load data.')
 
 

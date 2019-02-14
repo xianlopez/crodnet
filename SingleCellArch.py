@@ -27,7 +27,8 @@ class SingleCellArch:
             self.create_folders_for_eval_debug()
         self.proportion_valid_comparisons = 0
         self.proportion_same_comparisons = 0
-        self.batch_count = 0
+        self.batch_count_train_debug = 0
+        self.batch_count_eval_debug = 0
 
     def set_classnames(self, classnames):
         print('Setting classnames')
@@ -48,17 +49,16 @@ class SingleCellArch:
         loc_and_classif = network.localization_and_classification_path(common_representation, self.opts, self.nclasses)  # (batch_size, 1, 1, 4+nclasses)
         common_representation = tf.squeeze(common_representation, axis=[1, 2])  # (batch_size, lcr)
         loc_and_classif = tf.squeeze(loc_and_classif, axis=[1, 2])  # (batch_size, 4+nclasses)
-        comparisons_pred, comparisons_labels, comparisons_indices = self.make_comparisons(common_representation, labels_enc_reord)
+        comparisons_pred, comps_validity_labels, comparisons_indices = self.make_comparisons(common_representation, labels_enc_reord)
         # comparisons_pred, indices_all_comparisons: (total_comparisons, 2)
         # comparisons_labels: (total_comparisons)
-        loss, metrics = self.make_loss_and_metrics(loc_and_classif, labels_enc_reord, comparisons_pred,
-                                                   comparisons_labels, comparisons_indices)  # ()
+        loss, metrics = self.make_loss_and_metrics(loc_and_classif, labels_enc_reord, comparisons_pred, comps_validity_labels)  # ()
         if self.opts.debug_train:
             metrics = tf.py_func(self.write_train_debug_info, [metrics, inputs_reord, labels_enc_reord, loc_and_classif,
-                                                         comparisons_pred, comparisons_labels, comparisons_indices, filenames], (tf.float32))
+                                                         comparisons_pred, comps_validity_labels, comparisons_indices, filenames], (tf.float32))
         if self.opts.debug_eval:
             metrics = tf.py_func(self.write_eval_debug_info, [metrics, inputs_reord, labels_enc_reord, loc_and_classif,
-                                                         comparisons_pred, comparisons_labels, comparisons_indices, filenames], (tf.float32))
+                                                         comparisons_pred, comps_validity_labels, comparisons_indices, filenames], (tf.float32))
 
         return loc_and_classif, loss, metrics
 
@@ -77,7 +77,10 @@ class SingleCellArch:
         # image_indices_comp_intra: [0, 0, ..., 0, 1, 1, ..., 1, ..., n_images_per_batch, n_images_per_batch, ..., n_images_per_batch]
         image_indices_comp_intra_exp = tf.tile(tf.expand_dims(image_indices_comp_intra, axis=-1), [1, 2])  # (total_comparisons_intra, 2)
         # Generate random indices relative to their image:
-        crop_indices_intra = tf.random_uniform(shape=(total_comparisons_intra, 2), maxval=self.opts.n_crops_per_image, dtype=tf.int32)
+        crop_indices_intra_left = tf.random_uniform(shape=[total_comparisons_intra], maxval=self.opts.n_crops_per_image, dtype=tf.int32)
+        crop_indices_distance = tf.random_uniform(shape=[total_comparisons_intra], minval=1, maxval=self.opts.n_crops_per_image, dtype=tf.int32)
+        crop_indices_intra_right = tf.floormod(crop_indices_intra_left + crop_indices_distance, self.opts.n_crops_per_image)
+        crop_indices_intra = tf.stack([crop_indices_intra_left, crop_indices_intra_right], axis=-1)  # (total_comparisons_intra, 2)
         # Convert this relative indices to absolute:
         random_indices_intra = crop_indices_intra + self.opts.n_crops_per_image * image_indices_comp_intra_exp  # (total_comparisons_intra, 2)
 
@@ -106,17 +109,22 @@ class SingleCellArch:
         any_neutral = tf.gather(mask_neutral, random_indices_intra, axis=0)  # (total_comparisons_intra, 2)
         any_neutral = tf.greater(any_neutral, 0.5)
         any_neutral = tf.reduce_any(any_neutral, axis=1)  # (total_comparisons_intra)
-        labels_comp_intra = tf.logical_and(same_gt_idx, tf.logical_not(any_background))  # (total_comparisons_intra)
-        labels_comp_intra = tf.logical_and(labels_comp_intra, tf.logical_not(any_neutral))  # (total_comparisons_intra)
+        valid_comps_intra = tf.logical_not(tf.logical_or(any_background, any_neutral))
+        labels_comp_intra = same_gt_idx  # (total_comparisons_intra)
         labels_comp_inter = tf.zeros(shape=(total_comparisons_inter), dtype=tf.bool)
+        valid_comps_inter = tf.ones(shape=(total_comparisons_inter), dtype=tf.bool)
         labels_all_comparisons = tf.concat([labels_comp_intra, labels_comp_inter], axis=0)  # (total_comparisons)
+        valididty_all_comparisons = tf.concat([valid_comps_intra, valid_comps_inter], axis=0)  # (total_comparisons)
+        validity_labels_comps = tf.stack([valididty_all_comparisons, labels_all_comparisons], axis=1)  # (total_comparisons, 2)
 
-        return comparisons_pred, labels_all_comparisons, indices_all_comparisons
+        return comparisons_pred, validity_labels_comps, indices_all_comparisons
 
-    def make_loss_and_metrics(self, loc_and_classif, labels_enc_reord, comparisons_pred, comparisons_labels, comparisons_indices):
+    def make_loss_and_metrics(self, loc_and_classif, labels_enc_reord, comparisons_pred, comps_validity_labels):
         # common_representation: (batch_size, lcr)
         # loc_and_classif: (batch_size, 4+nclasses)
         # labels_enc_reord: (batch_size, n_labels)
+        # comparisons_pred: (total_comparisons, 2)
+        # comps_validity_labels: (total_comparisons, 2)  [validity, label]
 
         pred_conf = loc_and_classif[:, 4:]  # (batch_size, nclasses)
         pred_coords = loc_and_classif[:, :4]  # (batch_size, 4)
@@ -144,8 +152,7 @@ class SingleCellArch:
         tf.summary.scalar('metrics/iou_mean', iou_mean)
         total_loss += loc_loss
 
-        comp_loss, accuracy_comp = comparison_loss_and_metric(comparisons_pred, comparisons_labels, comparisons_indices,
-                                                              mask_match, mask_neutral, self.opts.comp_loss_factor)
+        comp_loss, accuracy_comp = comparison_loss_and_metric(comparisons_pred, comps_validity_labels, self.opts.comp_loss_factor)
         tf.summary.scalar('losses/comp_loss', comp_loss)
         tf.summary.scalar('metrics/accuracy_comp', accuracy_comp)
         total_loss += comp_loss
@@ -219,18 +226,18 @@ class SingleCellArch:
 
         return labels_enc  # (9)
 
-    def write_train_debug_info(self, metrics, inputs_reord, labels_enc_reord, loc_and_classif, comparisons_pred, comparisons_labels, comparisons_indices, filenames):
+    def write_train_debug_info(self, metrics, inputs_reord, labels_enc_reord, loc_and_classif, comparisons_pred, comps_validity_labels, comparisons_indices, filenames):
         # inputs_reord: (batch_size, input_image_size, input_image_size, 3)
         # labels_enc_reord: (batch_size, n_labels)
         # loc_and_classif: (batch_size, 4+nclasses)
         # comparisons_pred: (total_comparisons, 2)
-        # comparisons_labels: (total_comparisons)
+        # comps_validity_labels: (total_comparisons, 2)  [validity, label]
         # comparisons_indices: (total_comparisons, 2)
         # filenames: (n_images_per_batch)
         if self.classnames is None:
             raise Exception('classnames must be specified if debugging.')
-        self.batch_count += 1
-        batch_dir = os.path.join(self.outdir, 'batch' + str(self.batch_count))
+        self.batch_count_train_debug += 1
+        batch_dir = os.path.join(self.outdir, 'batch' + str(self.batch_count_train_debug))
         os.makedirs(batch_dir)
         batch_size = self.opts.n_crops_per_image * self.opts.n_images_per_batch
         filenames_ext = np.tile(np.expand_dims(filenames, axis=-1), [1, self.opts.n_crops_per_image])  # (n_images_per_batch, n_crops_per_image)
@@ -280,6 +287,8 @@ class SingleCellArch:
         os.makedirs(inter_dir)
         n_diff = 0
         n_same = 0
+        valid_comps = comps_validity_labels[:, 0]  # (total_comparisons)
+        comps_labels = comps_validity_labels[:, 1]  # (total_comparisons)
         for i in range(total_comparisons):
             idx1 = comparisons_indices[i, 0]
             idx2 = comparisons_indices[i, 1]
@@ -290,8 +299,6 @@ class SingleCellArch:
                 crop2 = inputs_reord[idx2, ...]  # (input_image_size, input_image_size, 3)
                 crop1 = add_mean_again(crop1)
                 crop2 = add_mean_again(crop2)
-                any_neutral = mask_neutral[idx1] or mask_neutral[idx2]
-                any_match = mask_match[idx1] or mask_match[idx2]
                 # Box of crop 1:
                 label_enc_1 = labels_enc_reord[idx1, :]
                 gt_class_1 = int(CommonEncoding.get_gt_class(label_enc_1))
@@ -311,16 +318,16 @@ class SingleCellArch:
                     class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
                     crop2 = tools.add_bounding_boxes_to_image(crop2, class_and_coords, color=(255, 0, 0))
                 # Label and prediction:
-                if any_neutral:
-                    gt_comp = 'NEUTRAL'
-                elif not any_match:
-                    gt_comp = 'NOMATCHES'
-                elif comparisons_labels[i] > 0.5:
-                    gt_comp = 'same'
-                    n_same += 1
+                is_valid = valid_comps[i] > 0.5
+                if is_valid:
+                    gt_comp = 'INVALID'
                 else:
-                    gt_comp = 'diff'
-                    n_diff += 1
+                    if comps_labels[i] > 0.5:
+                        gt_comp = 'same'
+                        n_same += 1
+                    else:
+                        gt_comp = 'diff'
+                        n_diff += 1
                 if comparisons_pred[i, 1] > comparisons_pred[i, 0]:
                     pred_comp = 'same'
                 else:
@@ -340,11 +347,14 @@ class SingleCellArch:
 
         total_valid_comparisons = n_same + n_diff
         proportion_valid_this_batch = float(total_valid_comparisons) / total_comparisons
-        proportion_same_this_batch = float(n_same) / total_valid_comparisons
-        self.proportion_valid_comparisons = (self.proportion_valid_comparisons * (self.batch_count - 1) +
-                                             proportion_valid_this_batch) / float(self.batch_count)
-        self.proportion_same_comparisons = (self.proportion_same_comparisons * (self.batch_count - 1) +
-                                            proportion_same_this_batch) / float(self.batch_count)
+        if total_valid_comparisons > 0:
+            proportion_same_this_batch = float(n_same) / total_valid_comparisons
+        else:
+            proportion_same_this_batch = 0
+        self.proportion_valid_comparisons = (self.proportion_valid_comparisons * (self.batch_count_train_debug - 1) +
+                                             proportion_valid_this_batch) / float(self.batch_count_train_debug)
+        self.proportion_same_comparisons = (self.proportion_same_comparisons * (self.batch_count_train_debug - 1) +
+                                            proportion_same_this_batch) / float(self.batch_count_train_debug)
         print('Percent of valid comparisons. This batch: {:3.2f}. Acummulated: {:3.2f}'.format(proportion_valid_this_batch * 100.0,
                                                                                                self.proportion_valid_comparisons * 100.0))
         print('Percent of same comparisons. This batch: {:3.2f}. Acummulated: {:3.2f}'.format(proportion_same_this_batch * 100.0,
@@ -374,17 +384,17 @@ class SingleCellArch:
         os.makedirs(self.comparison_diff_correct)
         os.makedirs(self.comparison_diff_wrong)
 
-    def write_eval_debug_info(self, metrics, inputs_reord, labels_enc_reord, loc_and_classif, comparisons_pred, comparisons_labels, comparisons_indices, filenames):
+    def write_eval_debug_info(self, metrics, inputs_reord, labels_enc_reord, loc_and_classif, comparisons_pred, comps_validity_labels, comparisons_indices, filenames):
         # inputs_reord: (batch_size, input_image_size, input_image_size, 3)
         # labels_enc_reord: (batch_size, n_labels)
         # loc_and_classif: (batch_size, 4+nclasses)
         # comparisons_pred: (total_comparisons, 2)
-        # comparisons_labels: (total_comparisons)
+        # comps_validity_labels: (total_comparisons, 2)  [validity, label]
         # comparisons_indices: (total_comparisons, 2)
         # filenames: (n_images_per_batch)
         if self.classnames is None:
             raise Exception('classnames must be specified if debugging.')
-        self.batch_count += 1
+        self.batch_count_eval_debug += 1
         batch_size = self.opts.n_crops_per_image * self.opts.n_images_per_batch
         filenames_ext = np.tile(np.expand_dims(filenames, axis=-1), [1, self.opts.n_crops_per_image])  # (n_images_per_batch, n_crops_per_image)
         filenames_reord = np.reshape(filenames_ext, newshape=(batch_size))  # (batch_size)
@@ -403,7 +413,7 @@ class SingleCellArch:
                 is_neutral = mask_neutral[i]
                 predicted_class = np.argmax(loc_and_classif[i, 4:])
                 if not is_neutral:
-                    file_name = 'batch' + str(self.batch_count) + '_' + name + '_crop' + str(i) + '_GT-' + \
+                    file_name = 'batch' + str(self.batch_count_eval_debug) + '_' + name + '_crop' + str(i) + '_GT-' + \
                                 self.classnames[gt_class] + '_PRED-' + self.classnames[predicted_class] + '.png'
                     if gt_class == predicted_class:
                         crop_path = os.path.join(self.correct_class_dir, file_name)
@@ -431,6 +441,8 @@ class SingleCellArch:
                 raise
 
         # Comparisons:
+        valid_comps = comps_validity_labels[:, 0]  # (total_comparisons)
+        comps_labels = comps_validity_labels[:, 1]  # (total_comparisons)
         total_comparisons = (self.opts.n_comparisons_inter + self.opts.n_comparisons_intra) * self.opts.n_images_per_batch
         n_diff = 0
         n_same = 0
@@ -440,10 +452,8 @@ class SingleCellArch:
             name1 = filenames_reord[idx1].decode(sys.getdefaultencoding())
             name2 = filenames_reord[idx2].decode(sys.getdefaultencoding())
             try:
-                any_neutral = mask_neutral[idx1] or mask_neutral[idx2]
-                any_match = mask_match[idx1] or mask_match[idx2]
-                is_of_interest = any_match and not any_neutral
-                if is_of_interest:
+                is_valid = valid_comps[i] > 0.5
+                if is_valid:
                     crop1 = inputs_reord[idx1, ...]  # (input_image_size, input_image_size, 3)
                     crop2 = inputs_reord[idx2, ...]  # (input_image_size, input_image_size, 3)
                     crop1 = add_mean_again(crop1)
@@ -467,7 +477,7 @@ class SingleCellArch:
                         class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
                         crop2 = tools.add_bounding_boxes_to_image(crop2, class_and_coords, color=(255, 0, 0))
                     # Label and prediction:
-                    if comparisons_labels[i] > 0.5:
+                    if comps_labels[i] > 0.5:
                         gt_comp = 'same'
                         n_same += 1
                     else:
@@ -478,7 +488,7 @@ class SingleCellArch:
                     else:
                         pred_comp = 'diff'
                     # Make the mosaic and save it:
-                    mosaic_name = 'batch' + str(self.batch_count) + '_comp' + str(i) + '_' + name1 + ' - ' + name2 + '.png'
+                    mosaic_name = 'batch' + str(self.batch_count_eval_debug) + '_comp' + str(i) + '_' + name1 + ' - ' + name2 + '.png'
                     if gt_comp == pred_comp:
                         if gt_comp == 'same':
                             mosaic_path = os.path.join(self.comparison_same_correct, mosaic_name)
@@ -499,11 +509,14 @@ class SingleCellArch:
 
         total_valid_comparisons = n_same + n_diff
         proportion_valid_this_batch = float(total_valid_comparisons) / total_comparisons
-        proportion_same_this_batch = float(n_same) / total_valid_comparisons
-        self.proportion_valid_comparisons = (self.proportion_valid_comparisons * (self.batch_count - 1) +
-                                             proportion_valid_this_batch) / float(self.batch_count)
-        self.proportion_same_comparisons = (self.proportion_same_comparisons * (self.batch_count - 1) +
-                                            proportion_same_this_batch) / float(self.batch_count)
+        if total_valid_comparisons > 0:
+            proportion_same_this_batch = float(n_same) / total_valid_comparisons
+        else:
+            proportion_same_this_batch = 0
+        self.proportion_valid_comparisons = (self.proportion_valid_comparisons * (self.batch_count_eval_debug - 1) +
+                                             proportion_valid_this_batch) / float(self.batch_count_eval_debug)
+        self.proportion_same_comparisons = (self.proportion_same_comparisons * (self.batch_count_eval_debug - 1) +
+                                            proportion_same_this_batch) / float(self.batch_count_eval_debug)
         print('Percent of valid comparisons. This batch: {:3.2f}. Acummulated: {:3.2f}'.format(proportion_valid_this_batch * 100.0,
                                                                                                self.proportion_valid_comparisons * 100.0))
         print('Percent of same comparisons. This batch: {:3.2f}. Acummulated: {:3.2f}'.format(proportion_same_this_batch * 100.0,
@@ -564,36 +577,29 @@ def localization_loss_and_metric(pred_coords, mask_match, gt_coords, zeros, n_po
     return loss_loc, iou_mean
 
 
-def comparison_loss_and_metric(comparisons_pred, comparisons_labels, comparisons_indices, mask_match, mask_neutral, comp_loss_factor):
+def comparison_loss_and_metric(comparisons_pred, comps_validity_labels, comp_loss_factor):
     # comparisons_pred: (total_comparisons, 2)
-    # comparisons_labels: (total_comparisons)
-    # comparisons_indices: (total_comparisons, 2)
-    # mask_match: (batch_size)
-    # mask_neutral: (batch_size)
+    # comps_validity_labels: (total_comparisons, 2)  [validity, label]
     with tf.variable_scope('comp_loss'):
-        comparisons_labels_int = tf.cast(comparisons_labels, tf.int32)
+        comparisons_labels_int = tf.cast(comps_validity_labels[:, 1], tf.int32)  # (total_comparisons)
+        comparisons_validity = comps_validity_labels[:, 0]  # (total_comparisons)
         loss_orig = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=comparisons_labels_int,
                                                                    logits=comparisons_pred, name='loss_orig')  # (total_comparisons)
-        comparisons_matches = tf.gather(mask_match, comparisons_indices, axis=0)  # (total_comparisons, 2)
-        any_match = tf.reduce_any(comparisons_matches, axis=1)  # (total_comparisons)
-        comparisons_neutrals = tf.gather(mask_neutral, comparisons_indices, axis=0)  # (total_comparisons, 2)
-        any_neutral = tf.reduce_any(comparisons_neutrals, axis=1)  # (total_comparisons)
-        zeros = tf.zeros_like(any_match, dtype=tf.float32)  # (total_comparisons)
+        zeros = tf.zeros_like(comparisons_validity, dtype=tf.float32)  # (total_comparisons)
         # TODO: Here we are supressing every case in which there is a neutral crop. If it is an inter-comparison, that's not necessary.
-        comps_to_consider = tf.logical_and(any_match, tf.logical_not(any_neutral))  # (total_comparisons)
-        loss_matches = tf.where(comps_to_consider, loss_orig, zeros, name='loss_match')  # (total_comparisons)
-        n_matches = tf.reduce_sum(tf.cast(comps_to_consider, tf.float32))  # ()
-        n_matches_safe = tf.maximum(n_matches, 1)  # ()
-        loss_comp = tf.reduce_sum(loss_matches)  # ()
-        loss_comp = tf.divide(loss_comp, n_matches_safe, name='loss_summed')
+        loss_on_valids = tf.where(comparisons_validity, loss_orig, zeros, name='loss_match')  # (total_comparisons)
+        n_valids = tf.reduce_sum(tf.cast(comparisons_validity, tf.float32))  # ()
+        n_valids_safe = tf.maximum(n_valids, 1)  # ()
+        loss_comp = tf.reduce_sum(loss_on_valids)  # ()
+        loss_comp = tf.divide(loss_comp, n_valids_safe, name='loss_summed')
         loss_comp = tf.multiply(loss_comp, comp_loss_factor, name='loss_comp')  # ()
 
         # Metric:
         predicted_class = tf.argmax(comparisons_pred, axis=1, output_type=tf.int32)  # (total_comparisons)
         hits = tf.cast(tf.equal(comparisons_labels_int, predicted_class), tf.float32)  # (total_comparisons)
-        hits_matches = tf.where(comps_to_consider, hits, zeros)  # (total_comparisons)
-        n_hits = tf.reduce_sum(hits_matches)  # ()
-        accuracy_comp = tf.divide(n_hits, n_matches_safe)  # ()
+        hits_valids = tf.where(comparisons_validity, hits, zeros)  # (total_comparisons)
+        n_hits = tf.reduce_sum(hits_valids)  # ()
+        accuracy_comp = tf.divide(n_hits, n_valids_safe)  # ()
     return loss_comp, accuracy_comp
 
 

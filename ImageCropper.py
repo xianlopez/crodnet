@@ -112,21 +112,21 @@ def sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_widt
     patch = image[patch_y0_abs:(patch_y0_abs+patch_side_abs), patch_x0_abs:(patch_x0_abs+patch_side_abs), :]  # (patch_side_abs, patch_side_abs, 3)
     # Percent contained:
     pc = compute_pc(bboxes, [patch_x0_rel, patch_y0_rel, patch_width_rel, patch_height_rel])  # (n_gt)
-    # Bounding boxes:
 
+    # Remaining boxes:
     remaining_boxes_mask = pc > 1e-4  # (n_gt)
     n_remaining_boxes = np.sum(remaining_boxes_mask.astype(np.int8))
     remaining_boxes_mask_ext = np.tile(np.expand_dims(remaining_boxes_mask, axis=1), [1, 6])  # (n_gt, 6)
-    remaining_boxes_orig_coords = np.extract(remaining_boxes_mask_ext, bboxes)  # (n_remaining_boxes * 6)
-    remaining_boxes_orig_coords = np.reshape(remaining_boxes_orig_coords, (n_remaining_boxes, 6))  # (n_remaining_boxes, 6)
+    remaining_boxes_on_orig_coords = np.extract(remaining_boxes_mask_ext, bboxes)  # (n_remaining_boxes * 6)
+    remaining_boxes_on_orig_coords = np.reshape(remaining_boxes_on_orig_coords, (n_remaining_boxes, 6))  # (n_remaining_boxes, 6)
 
-    remaining_boxes_class_id = remaining_boxes_orig_coords[:, 0]  # (n_remaining_boxes)
-    remaining_boxes_pc = remaining_boxes_orig_coords[:, 5]  # (n_remaining_boxes)
+    remaining_boxes_class_id = remaining_boxes_on_orig_coords[:, 0]  # (n_remaining_boxes)
+    remaining_boxes_pc = np.extract(remaining_boxes_mask, pc)  # (n_remaining_boxes)
 
-    remaining_boxes_x0 = (remaining_boxes_orig_coords[:, 1] - patch_x0_rel) / patch_width_rel
-    remaining_boxes_y0 = (remaining_boxes_orig_coords[:, 2] - patch_y0_rel) / patch_height_rel
-    remaining_boxes_x1 = (remaining_boxes_orig_coords[:, 1] + remaining_boxes_orig_coords[:, 3] - patch_x0_rel) / patch_width_rel
-    remaining_boxes_y1 = (remaining_boxes_orig_coords[:, 2] + remaining_boxes_orig_coords[:, 4] - patch_y0_rel) / patch_height_rel
+    remaining_boxes_x0 = (remaining_boxes_on_orig_coords[:, 1] - patch_x0_rel) / patch_width_rel
+    remaining_boxes_y0 = (remaining_boxes_on_orig_coords[:, 2] - patch_y0_rel) / patch_height_rel
+    remaining_boxes_x1 = (remaining_boxes_on_orig_coords[:, 1] + remaining_boxes_on_orig_coords[:, 3] - patch_x0_rel) / patch_width_rel
+    remaining_boxes_y1 = (remaining_boxes_on_orig_coords[:, 2] + remaining_boxes_on_orig_coords[:, 4] - patch_y0_rel) / patch_height_rel
     remaining_boxes_x0 = np.maximum(remaining_boxes_x0, 0)  # (n_remaining_boxes)
     remaining_boxes_y0 = np.maximum(remaining_boxes_y0, 0)  # (n_remaining_boxes)
     remaining_boxes_x1 = np.minimum(remaining_boxes_x1, 1)
