@@ -166,7 +166,7 @@ class SingleCellArch:
         return input_shape
 
     def encode_gt_from_array(self, gt_boxes):
-        # gt_boxes: (n_gt, 6) [class_id, xmin, ymin, width, height, pc]
+        # gt_boxes: (n_gt, 7) [class_id, xmin, ymin, width, height, pc, gt_idx]
         n_gt = gt_boxes.shape[0]
         if n_gt > 0:
             gt_coords = gt_boxes[:, 1:5]  # (n_gt, 4)
@@ -185,7 +185,7 @@ class SingleCellArch:
 
             dc_masked = np.where(mask_thresholds, dc, np.infty * np.ones(shape=(n_gt), dtype=np.float32) ) # (n_gt)
 
-            nearest_valid_gt_idx = np.argmin(dc_masked)  # ()
+            nearest_valid_box_idx = np.argmin(dc_masked)  # ()
 
             # Neutral boxes:
             mask_ar_neutral = ar > self.opts.threshold_ar_neutral  # (n_gt)
@@ -196,9 +196,9 @@ class SingleCellArch:
             is_neutral = np.logical_and(any_neutral, np.logical_not(any_match))  # ()
 
             # Get the coordinates and the class id of the gt box matched:
-            coordinates = gt_coords[nearest_valid_gt_idx, :]  # (4)
+            coordinates = gt_coords[nearest_valid_box_idx, :]  # (4)
             coordinates_enc = encode_boxes_np(coordinates, self.opts)  # (4)
-            class_id = gt_class_ids[nearest_valid_gt_idx]
+            class_id = gt_class_ids[nearest_valid_box_idx]
 
             # Negative boxes:
             is_negative = np.logical_and(np.logical_not(any_match), np.logical_not(is_neutral))  # ()
@@ -208,15 +208,18 @@ class SingleCellArch:
             # Percent contained associated with each anchor box.
             # This is the PC of the assigned gt box, if there is any, or otherwise the maximum PC it has.
             if any_match:
-                pc_associated = pc[nearest_valid_gt_idx]
+                pc_associated = pc[nearest_valid_box_idx]
             else:
                 pc_associated = np.max(pc)
+
+            # Take the original GT index:
+            associated_gt_idx = gt_boxes[nearest_valid_box_idx, 6]  # ()
 
             # Put all together in one array:
             labels_enc = np.stack([any_match.astype(np.float32),
                                    is_neutral.astype(np.float32),
                                    float(class_id),
-                                   nearest_valid_gt_idx.astype(np.float32),
+                                   associated_gt_idx,
                                    pc_associated])
             labels_enc = np.concatenate([coordinates_enc, labels_enc])  # (9)
 
@@ -452,6 +455,17 @@ class SingleCellArch:
             name1 = filenames_reord[idx1].decode(sys.getdefaultencoding())
             name2 = filenames_reord[idx2].decode(sys.getdefaultencoding())
             is_intra = i < self.opts.n_comparisons_intra * self.opts.n_images_per_batch
+            if is_intra:
+                print('')
+                print('batch ' + str(self.batch_count_eval_debug) + ', comparison ' + str(i))
+                print('indices: ' + str(idx1) + ' - ' + str(idx2))
+                print('names: ' + name1 + ' - ' + name2)
+                is_match_1 = mask_match[idx1] > 0.5
+                is_match_2 = mask_match[idx2] > 0.5
+                is_neutral_1 = mask_neutral[idx1] > 0.5
+                is_neutral_2 = mask_neutral[idx2] > 0.5
+                print('match: ' + str(is_match_1) + ' - ' + str(is_match_2))
+                print('neutral: ' + str(is_neutral_1) + ' - ' + str(is_neutral_2))
             try:
                 is_valid = valid_comps[i] > 0.5
                 if is_valid:
@@ -493,6 +507,13 @@ class SingleCellArch:
                         pred_comp = 'same'
                     else:
                         pred_comp = 'diff'
+                    if is_intra:
+                        print('gt_comp = ' + gt_comp)
+                        print('pred_comp = ' + pred_comp)
+                        print('gt_class_1 = ' + str(gt_class_1))
+                        print('gt_class_2 = ' + str(gt_class_2))
+                        print('gt_idx_1 = ' + str(gt_idx_1))
+                        print('gt_idx_2 = ' + str(gt_idx_2))
                     # Make the mosaic and save it:
                     mosaic_name = 'batch' + str(self.batch_count_eval_debug) + '_comp' + str(i) + '_' + name1 + ' - ' + name2 + '.png'
                     if gt_comp == pred_comp:
@@ -505,6 +526,8 @@ class SingleCellArch:
                             mosaic_path = os.path.join(self.comparison_same_wrong, mosaic_name)
                         else:
                             mosaic_path = os.path.join(self.comparison_diff_wrong, mosaic_name)
+                    if is_intra:
+                        print('mosaic_path = ' + mosaic_path)
                     separator = np.zeros(shape=(network.receptive_field_size, 10, 3), dtype=np.float32)
                     mosaic = np.concatenate([crop1, separator, crop2], axis=1)  # (2*input_image_size+10, input_image_size, 3)
                     cv2.imwrite(mosaic_path, cv2.cvtColor(mosaic.astype(np.uint8), cv2.COLOR_RGB2BGR))

@@ -46,7 +46,6 @@ class TrainDataReader:
         print(self.classnames)
         self.img_extension = '.' + self.img_extension
         self.outdir = opts.outdir
-        self.write_network_input = opts.write_network_input
 
         self.shuffle_data = opts.shuffle_data
 
@@ -149,8 +148,6 @@ class TrainDataReader:
             dataset = dataset.map(self.data_aug_func, num_parallel_calls=self.num_workers)  # image, bboxes, filename
         dataset = dataset.map(self.preprocess_extended, num_parallel_calls=self.num_workers)  # image, bboxes, filename
         dataset = dataset.map(self.take_crops_from_image, num_parallel_calls=self.num_workers)  # crops, label_enc, filename
-        if self.write_network_input:
-            dataset = dataset.map(self.write_network_input_func, num_parallel_calls=self.num_workers)
         if self.shuffle_data:
             dataset = dataset.shuffle(buffer_size=self.buffer_size)
         return dataset.batch(self.n_images_per_batch)
@@ -158,14 +155,14 @@ class TrainDataReader:
     # ------------------------------------------------------------------------------------------------------------------
     def parse_image(self, filename):
         (image, bboxes) = tf.py_func(self.read_image_with_bboxes, [filename], (tf.float32, tf.float32), name='read_det_im_ann')
-        bboxes.set_shape((None, 6))  # (n_gt, 6) [class_id, x_min, y_min, width, height, pc]
+        bboxes.set_shape((None, 7))  # (n_gt, 7) [class_id, x_min, y_min, width, height, pc, gt_idx]
         image.set_shape((None, None, 3))  # (height, width, 3)
         return image, bboxes, filename
 
     # ------------------------------------------------------------------------------------------------------------------
     def preprocess_extended(self, crops, bboxes, filename):
         # crops: (n_crops_per_image, height, width, 3)
-        # bboxes: (n_gt, 6)
+        # bboxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
         # filename: ()
         crops = self.preprocessor.subtract_mean(crops)
         return crops, bboxes, filename
@@ -186,9 +183,11 @@ class TrainDataReader:
         img_height, img_width, _ = image.shape
         labelfile = os.path.join(dirann, filename + '.txt')
         bboxes = []
+        gt_idx = -1
         with open(labelfile, 'r') as fid:
             content = fid.read().splitlines()
             for line in content:
+                gt_idx += 1
                 line_split = line.split(' ')
                 classid = int(line_split[0])
                 # Get coordinates from string:
@@ -206,50 +205,15 @@ class TrainDataReader:
                 ymin = ymin / img_height
                 width = width / img_width
                 height = height / img_height
-                bboxes.append([classid, xmin, ymin, width, height, 1.0])
-        bboxes_array = np.zeros((len(bboxes), 6), dtype=np.float32)
+                bboxes.append([classid, xmin, ymin, width, height, 1.0, gt_idx])
+        bboxes_array = np.zeros((len(bboxes), 7), dtype=np.float32)
         for i in range(len(bboxes)):
             bboxes_array[i, :] = bboxes[i]
         return image, bboxes_array
 
-    def write_network_input_pyfunc(self, image, bboxes):
-        img = image.copy()
-        height = img.shape[0]
-        width = img.shape[1]
-        min_val = np.min(img)
-        img = img - min_val
-        max_val = np.max(img)
-        img = img / float(max_val) * 255.0
-        img = img.astype(np.uint8)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        for box in bboxes:
-            class_id = int(box[0])
-            xmin = int(np.round(box[1] * width))
-            ymin = int(np.round(box[2] * height))
-            w = int(np.round(box[3] * width))
-            h = int(np.round(box[4] * height))
-            cv2.rectangle(img, (xmin, ymin), (xmin + w, ymin + h), (0, 0, 255), 2)
-            cv2.rectangle(img, (xmin, ymin - 20),
-                          (xmin + w, ymin), (125, 125, 125), -1)
-            cv2.putText(img, self.classnames[class_id], (xmin + 5, ymin - 7),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
-        number = 0
-        file_path_candidate = os.path.join(self.outdir, 'input' + str(number) + '.png')
-        while os.path.exists(file_path_candidate):
-            number += 1
-            file_path_candidate = os.path.join(self.outdir, 'input' + str(number) + '.png')
-        cv2.imwrite(file_path_candidate, img)
-        return image
-
-    def write_network_input_func(self, image, bboxes, filename):
-        shape = image.shape
-        image = tf.py_func(self.write_network_input_pyfunc, [image, bboxes], tf.float32, name='write_network_input')
-        image.set_shape(shape)
-        return image, bboxes, filename
-
     def take_crops_from_image(self, image, bboxes, filename):
         # image: (height, width, 3)
-        # bboxes: (n_gt, 6)
+        # bboxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
         # filename: ()
         crops, labels_enc = tf.py_func(self.image_cropper.take_crops_on_image, [image, bboxes], (tf.float32, tf.float32))
         crops.set_shape((self.n_crops_per_image, network.receptive_field_size, network.receptive_field_size, 3))

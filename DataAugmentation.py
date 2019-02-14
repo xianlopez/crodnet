@@ -79,15 +79,15 @@ class DataAugmentation:
         return image, bboxes, filename
 
     def flip_boxes_vertically(self, bboxes):
-        # bboxes: (nboxes, 5)
+        # bboxes: (nboxes, 7)
         new_y_min = 1.0 - bboxes[:, 2] - bboxes[:, 4]  # (nboxes)
         before = bboxes[:, :2]  # (nboxes, 2)
         after = bboxes[:, 3:]  # (nboxes, 2)
-        bboxes = tf.concat([before, tf.expand_dims(new_y_min, axis=1), after], axis=1)  # (nboxes, 5)
+        bboxes = tf.concat([before, tf.expand_dims(new_y_min, axis=1), after], axis=1)  # (nboxes, 7)
         return bboxes
 
     def flip_boxes_horizontally(self, bboxes):
-        # bboxes: (nboxes, 5)
+        # bboxes: (nboxes, 7)
         new_x_min = 1.0 - bboxes[:, 1] - bboxes[:, 3]  # (nboxes)
         before = tf.expand_dims(bboxes[:, 0], axis=1)  # (nboxes, 2)
         after = bboxes[:, 2:]  # (nboxes, 2)

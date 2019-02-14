@@ -77,7 +77,6 @@ class TrainConfiguration:
     buffer_size = 1000 # For shuffling data.
     max_image_size = 600
     gpu_memory_fraction = -1.0
-    write_network_input = False
     shuffle_data = True
     ##################################
 

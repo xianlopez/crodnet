@@ -20,6 +20,8 @@ class ImageCropper:
         self.n_crops_per_image = n_crops_per_image
 
     def take_crops_on_image(self, image, bboxes):
+        # image: (orig_height, orig_width, 3)
+        # bboxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
         # Pad the image to make it square:
         image, bboxes = pad_to_make_square(image, bboxes)
         # Add a black frame around the image, to allow crops to lie partially outside the image:
@@ -56,14 +58,14 @@ class ImageCropper:
 
     def crop_only_random(self, image, bboxes, img_side):
         # image: (img_side, img_side, 3)
-        # bboxes: (n_gt, 6) [class_id, xmin, ymin, width, height, percent_contained]
+        # bboxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
         patch, remaining_boxes = sample_random_patch(image, bboxes, img_side, self.opts.min_side_scale, self.opts.max_side_scale)
         crop, label_enc = self.keep_one_box_and_resize(patch, remaining_boxes)
         return crop, label_enc
 
     def crop_following_policy(self, image, bboxes, img_side):
         # image: (img_side, img_side, 3)
-        # bboxes: (n_gt, 6) [class_id, xmin, ymin, width, height, percent_contained]
+        # bboxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
         n_gt = bboxes.shape[0]
         rnd1 = np.random.rand()
         if rnd1 < self.opts.probability_random or n_gt == 0:
@@ -76,7 +78,7 @@ class ImageCropper:
 
     def keep_one_box_and_resize(self, patch, remaining_boxes):
         # patch: (patch_side_abs, patch_side_abs, 3)
-        # remaining_boxes: (n_remaining_boxes, 6) [class_id, xmin, ymin, width, height, percent_contained]
+        # remaining_boxes: (n_remaining_boxes, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
         # Encode the labels (and keep only one box):
         label_enc = self.single_cell_arch.encode_gt_from_array(remaining_boxes)  # (9)
         # Resize the crop to the size expected by the network:
@@ -86,7 +88,7 @@ class ImageCropper:
 
 def pad_to_make_square(image, bboxes):
     # image: (orig_height, orig_width, 3)
-    # bboxes: (n_gt, 6) [class_id, xmin, ymin, width, height, percent_contained]
+    # bboxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
     orig_height, orig_width, _ = image.shape
     max_side = max(orig_height, orig_width)
     # Increment on each side:
@@ -111,11 +113,11 @@ def pad_to_make_square(image, bboxes):
 
 def sample_patch_focusing_on_object(image, bboxes, img_side, obj_idx, max_dc, min_ar):
     # image: (img_side, img_side, 3)
-    # bboxes: (n_gt, 6) [class_id, xmin, ymin, width, height, percent_contained]
+    # bboxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
     patch_x0_rel, patch_y0_rel, patch_side_rel = make_patch_shape_focusing_on_object(bboxes[obj_idx, :], max_dc, min_ar)
     patch, remaining_boxes = sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_side_rel, patch_side_rel)
     # patch: (patch_side_abs, patch_side_abs, 3)
-    # remaining_boxes: (n_remaining_boxes, 6) [class_id, xmin, ymin, width, height, percent_contained]
+    # remaining_boxes: (n_remaining_boxes, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
     return patch, remaining_boxes
 
 
@@ -174,17 +176,17 @@ def make_patch_shape_focusing_on_object(bbox, max_dc, min_ar):
 
 def sample_random_patch(image, bboxes, img_side, min_scale, max_scale):
     # image: (img_side, img_side, 3)
-    # bboxes: (n_gt, 6) [class_id, xmin, ymin, width, height, percent_contained]
+    # bboxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
     patch_x0_rel, patch_y0_rel, patch_width_rel, patch_height_rel = make_patch_shape(img_side, min_scale, max_scale)
     patch, remaining_boxes = sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_width_rel, patch_height_rel)
     # patch: (patch_side_abs, patch_side_abs, 3)
-    # remaining_boxes: (n_remaining_boxes, 6) [class_id, xmin, ymin, width, height, percent_contained]
+    # remaining_boxes: (n_remaining_boxes, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
     return patch, remaining_boxes
 
 
 def sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_width_rel, patch_height_rel):
     # image: (img_side, img_side, 3)
-    # bboxes: (n_gt, 6) [class_id, xmin, ymin, width, height, percent_contained]
+    # bboxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
     # Convert to absolute coordinates:
     patch_x0_abs = max(np.round(patch_x0_rel * img_side).astype(np.int32), 0)
     patch_y0_abs = max(np.round(patch_y0_rel * img_side).astype(np.int32), 0)
@@ -200,12 +202,14 @@ def sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_widt
     # Remaining boxes:
     remaining_boxes_mask = pc > 1e-4  # (n_gt)
     n_remaining_boxes = np.sum(remaining_boxes_mask.astype(np.int8))
-    remaining_boxes_mask_ext = np.tile(np.expand_dims(remaining_boxes_mask, axis=1), [1, 6])  # (n_gt, 6)
+    remaining_boxes_mask_ext = np.tile(np.expand_dims(remaining_boxes_mask, axis=1), [1, 7])  # (n_gt, 7)
     remaining_boxes_on_orig_coords = np.extract(remaining_boxes_mask_ext, bboxes)  # (n_remaining_boxes * 6)
-    remaining_boxes_on_orig_coords = np.reshape(remaining_boxes_on_orig_coords, (n_remaining_boxes, 6))  # (n_remaining_boxes, 6)
+    remaining_boxes_on_orig_coords = np.reshape(remaining_boxes_on_orig_coords, (n_remaining_boxes, 7))  # (n_remaining_boxes, 7)
 
     remaining_boxes_class_id = remaining_boxes_on_orig_coords[:, 0]  # (n_remaining_boxes)
     remaining_boxes_pc = np.extract(remaining_boxes_mask, pc)  # (n_remaining_boxes)
+    orig_boxes_gt_idx = bboxes[:, 6]  # (n_gt)
+    remaining_boxes_gt_idx = np.extract(remaining_boxes_mask, orig_boxes_gt_idx)  # (n_remaining_boxes)
 
     remaining_boxes_x0 = (remaining_boxes_on_orig_coords[:, 1] - patch_x0_rel) / patch_width_rel
     remaining_boxes_y0 = (remaining_boxes_on_orig_coords[:, 2] - patch_y0_rel) / patch_height_rel
@@ -220,13 +224,14 @@ def sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_widt
 
     remaining_boxes = np.stack([remaining_boxes_class_id, remaining_boxes_x0,
                                 remaining_boxes_y0, remaining_boxes_width,
-                                remaining_boxes_height, remaining_boxes_pc], axis=-1)  # (n_remaining_boxes, 6)
+                                remaining_boxes_height, remaining_boxes_pc,
+                                remaining_boxes_gt_idx], axis=-1)  # (n_remaining_boxes, 7)
     return patch, remaining_boxes
 
 
 def compute_pc(gt_boxes, patch):
     # patch: [xmin, ymin, width, height]
-    # gt_boxes: (n_gt, 6) [class_id, xmin, ymin, width, height, percent_contained]
+    # gt_boxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
 
     n_gt = gt_boxes.shape[0]
     patch_exp = np.expand_dims(patch, axis=0)
