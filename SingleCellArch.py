@@ -451,6 +451,7 @@ class SingleCellArch:
             idx2 = comparisons_indices[i, 1]
             name1 = filenames_reord[idx1].decode(sys.getdefaultencoding())
             name2 = filenames_reord[idx2].decode(sys.getdefaultencoding())
+            is_intra = i < self.opts.n_comparisons_intra * self.opts.n_images_per_batch
             try:
                 is_valid = valid_comps[i] > 0.5
                 if is_valid:
@@ -461,6 +462,7 @@ class SingleCellArch:
                     # Box of crop 1:
                     label_enc_1 = labels_enc_reord[idx1, :]
                     gt_class_1 = int(CommonEncoding.get_gt_class(label_enc_1))
+                    gt_idx_1 = int(CommonEncoding.get_nearest_valid_gt_idx(label_enc_1))
                     if gt_class_1 != self.background_id:
                         gt_coords_enc_1 = CommonEncoding.get_gt_coords(label_enc_1)
                         gt_coords_dec_1 = decode_boxes_np(gt_coords_enc_1, self.opts)
@@ -470,6 +472,7 @@ class SingleCellArch:
                     # Box of crop 2:
                     label_enc_2 = labels_enc_reord[idx2, :]
                     gt_class_2 = int(CommonEncoding.get_gt_class(label_enc_2))
+                    gt_idx_2 = int(CommonEncoding.get_nearest_valid_gt_idx(label_enc_2))
                     if gt_class_2 != self.background_id:
                         gt_coords_enc_2 = CommonEncoding.get_gt_coords(label_enc_2)
                         gt_coords_dec_2 = decode_boxes_np(gt_coords_enc_2, self.opts)
@@ -480,9 +483,12 @@ class SingleCellArch:
                     if comps_labels[i] > 0.5:
                         gt_comp = 'same'
                         n_same += 1
+                        assert gt_idx_1 == gt_idx_2, 'Boxes marked as same, but associated GT is different.'
                     else:
                         gt_comp = 'diff'
                         n_diff += 1
+                        if is_intra and gt_idx_1 == gt_idx_2:
+                            raise Exception('Intra comparison, boxes marked as different, but same GT associated.')
                     if comparisons_pred[i, 1] > comparisons_pred[i, 0]:
                         pred_comp = 'same'
                     else:

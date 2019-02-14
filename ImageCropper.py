@@ -8,6 +8,9 @@ class ImageCropperOptions:
         self.padding_factor = 0.25
         self.min_side_scale = 0.05
         self.max_side_scale = 0.7
+        self.max_dc = 0.5
+        self.min_ar = 0.05
+        self.probability_random = 0.25
 
 
 class ImageCropper:
@@ -25,7 +28,7 @@ class ImageCropper:
         crops = np.zeros(shape=(self.n_crops_per_image, network.receptive_field_size, network.receptive_field_size, 3), dtype=np.float32)
         labels_enc = np.zeros(shape=(self.n_crops_per_image, self.single_cell_arch.n_labels), dtype=np.float32)
         for i in range(self.n_crops_per_image):
-            this_crop, this_label_enc = self.make_crop_keep_one_box_and_resize(padded_image, bboxes, padded_side)
+            this_crop, this_label_enc = self.crop_following_policy(padded_image, bboxes, padded_side)
             crops[i, :, :, :] = this_crop
             labels_enc[i, :] = this_label_enc
         return crops, labels_enc
@@ -51,11 +54,29 @@ class ImageCropper:
         bboxes[:, 4] = bboxes[:, 4] / (1.0 + rel_incr_top + rel_incr_bottom)
         return padded_image, bboxes, padded_side
 
-    def make_crop_keep_one_box_and_resize(self, image, bboxes, img_side):
+    def crop_only_random(self, image, bboxes, img_side):
         # image: (img_side, img_side, 3)
         # bboxes: (n_gt, 6) [class_id, xmin, ymin, width, height, percent_contained]
-        # Take a random crop:
         patch, remaining_boxes = sample_random_patch(image, bboxes, img_side, self.opts.min_side_scale, self.opts.max_side_scale)
+        crop, label_enc = self.keep_one_box_and_resize(patch, remaining_boxes)
+        return crop, label_enc
+
+    def crop_following_policy(self, image, bboxes, img_side):
+        # image: (img_side, img_side, 3)
+        # bboxes: (n_gt, 6) [class_id, xmin, ymin, width, height, percent_contained]
+        n_gt = bboxes.shape[0]
+        rnd1 = np.random.rand()
+        if rnd1 < self.opts.probability_random or n_gt == 0:
+            patch, remaining_boxes = sample_random_patch(image, bboxes, img_side, self.opts.min_side_scale, self.opts.max_side_scale)
+        else:
+            box_idx = np.random.randint(0, n_gt)
+            patch, remaining_boxes = sample_patch_focusing_on_object(image, bboxes, img_side, box_idx, self.opts.max_dc, self.opts.min_ar)
+        crop, label_enc = self.keep_one_box_and_resize(patch, remaining_boxes)
+        return crop, label_enc
+
+    def keep_one_box_and_resize(self, patch, remaining_boxes):
+        # patch: (patch_side_abs, patch_side_abs, 3)
+        # remaining_boxes: (n_remaining_boxes, 6) [class_id, xmin, ymin, width, height, percent_contained]
         # Encode the labels (and keep only one box):
         label_enc = self.single_cell_arch.encode_gt_from_array(remaining_boxes)  # (9)
         # Resize the crop to the size expected by the network:
@@ -86,6 +107,69 @@ def pad_to_make_square(image, bboxes):
     bboxes[:, 3] = bboxes[:, 3] / (1.0 + rel_incr_left + rel_incr_right)
     bboxes[:, 4] = bboxes[:, 4] / (1.0 + rel_incr_top + rel_incr_bottom)
     return image, bboxes
+
+
+def sample_patch_focusing_on_object(image, bboxes, img_side, obj_idx, max_dc, min_ar):
+    # image: (img_side, img_side, 3)
+    # bboxes: (n_gt, 6) [class_id, xmin, ymin, width, height, percent_contained]
+    patch_x0_rel, patch_y0_rel, patch_side_rel = make_patch_shape_focusing_on_object(bboxes[obj_idx, :], max_dc, min_ar)
+    patch, remaining_boxes = sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_side_rel, patch_side_rel)
+    # patch: (patch_side_abs, patch_side_abs, 3)
+    # remaining_boxes: (n_remaining_boxes, 6) [class_id, xmin, ymin, width, height, percent_contained]
+    return patch, remaining_boxes
+
+
+def make_patch_shape_focusing_on_object(bbox, max_dc, min_ar):
+    # bbox: (6) [class_id, xmin, ymin, width, height, percent_contained]
+    # Everything is in relative coordinates.
+    # Coordinates of the square box containing the GT box:
+    box_center_x = bbox[1] + bbox[3] / 2.0
+    box_center_y = bbox[2] + bbox[4] / 2.0
+    box_sq_side = max(bbox[3], bbox[4])
+    box_sq_xmin = max(box_center_x - box_sq_side / 2.0, 0)
+    box_sq_ymin = max(box_center_y - box_sq_side / 2.0, 0)
+    box_sq_xmax = box_sq_xmin + box_sq_side
+    box_sq_ymax = box_sq_ymin + box_sq_side
+    if box_sq_xmax > 1:
+        box_sq_xmax = 1
+        box_sq_xmin = 1 - box_sq_side
+    if box_sq_ymax > 1:
+        box_sq_ymax = 1
+        box_sq_ymin = 1 - box_sq_side
+
+    # Maximum square patch centered on the GT box:
+    margin_left = box_sq_xmin
+    margin_right = 1 - box_sq_xmax
+    margin_top = box_sq_ymin
+    margin_bottom = 1 - box_sq_ymax
+    min_margin_x = min(margin_left, margin_right)
+    min_margin_y = min(margin_top, margin_bottom)
+    max_width = 2 * min_margin_x + box_sq_side
+    max_height = 2 * min_margin_y + box_sq_side
+    max_patch_side = min(max_width, max_height)
+
+    # Limit the patch side using the Area Ratio constrain:
+    max_path_side_by_ar = box_sq_side / np.sqrt(min_ar)
+    max_patch_side = min(max_patch_side, max_path_side_by_ar)
+
+    # Sample patch side:
+    patch_side = box_sq_side + np.random.rand() * (max_patch_side - box_sq_side)
+
+    # Patch center:
+    dc_max_side = max_dc / np.sqrt(2)
+    dc_x = np.random.rand() * dc_max_side
+    dc_y = np.random.rand() * dc_max_side
+    patch_center_x = box_center_x - patch_side * dc_x / 2.0
+    patch_center_y = box_center_y - patch_side * dc_y / 2.0
+
+    # Patch final coordinates:
+    patch_xmin = max(patch_center_x - patch_side / 2.0, 0)
+    patch_ymin = max(patch_center_y - patch_side / 2.0, 0)
+    if patch_xmin + patch_side > 1:
+        patch_side = 1 - patch_xmin
+    if patch_ymin + patch_side > 1:
+        patch_side = 1 - patch_ymin
+    return patch_xmin, patch_ymin, patch_side
 
 
 def sample_random_patch(image, bboxes, img_side, min_scale, max_scale):
