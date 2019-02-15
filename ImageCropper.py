@@ -177,27 +177,25 @@ def make_patch_shape_focusing_on_object(bbox, max_dc, min_ar):
 def sample_random_patch(image, bboxes, img_side, min_scale, max_scale):
     # image: (img_side, img_side, 3)
     # bboxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
-    patch_x0_rel, patch_y0_rel, patch_width_rel, patch_height_rel = make_patch_shape(img_side, min_scale, max_scale)
-    patch, remaining_boxes = sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_width_rel, patch_height_rel)
+    patch_x0_rel, patch_y0_rel, patch_side_rel = make_patch_shape(img_side, min_scale, max_scale)
+    patch, remaining_boxes = sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_side_rel)
     # patch: (patch_side_abs, patch_side_abs, 3)
     # remaining_boxes: (n_remaining_boxes, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
     return patch, remaining_boxes
 
 
-def sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_width_rel, patch_height_rel):
+def sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_side_rel):
     # image: (img_side, img_side, 3)
     # bboxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
     # Convert to absolute coordinates:
     patch_x0_abs = max(np.round(patch_x0_rel * img_side).astype(np.int32), 0)
     patch_y0_abs = max(np.round(patch_y0_rel * img_side).astype(np.int32), 0)
-    patch_width_abs = min(np.round(patch_width_rel * img_side).astype(np.int32), img_side - patch_x0_abs)
-    patch_height_abs = min(np.round(patch_height_rel * img_side).astype(np.int32), img_side - patch_y0_abs)
-    assert patch_width_abs == patch_height_abs, 'Patch has different width and height.'
-    patch_side_abs = patch_height_abs
+    patch_side_abs = np.round(patch_side_rel * img_side).astype(np.int32)
+    patch_side_abs = min(patch_side_abs, img_side - patch_y0_abs)
     # Image:
     patch = image[patch_y0_abs:(patch_y0_abs+patch_side_abs), patch_x0_abs:(patch_x0_abs+patch_side_abs), :]  # (patch_side_abs, patch_side_abs, 3)
     # Percent contained:
-    pc = compute_pc(bboxes, [patch_x0_rel, patch_y0_rel, patch_width_rel, patch_height_rel])  # (n_gt)
+    pc = compute_pc(bboxes, [patch_x0_rel, patch_y0_rel, patch_side_rel, patch_side_rel])  # (n_gt)
 
     # Remaining boxes:
     remaining_boxes_mask = pc > 1e-4  # (n_gt)
@@ -211,10 +209,10 @@ def sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_widt
     orig_boxes_gt_idx = bboxes[:, 6]  # (n_gt)
     remaining_boxes_gt_idx = np.extract(remaining_boxes_mask, orig_boxes_gt_idx)  # (n_remaining_boxes)
 
-    remaining_boxes_x0 = (remaining_boxes_on_orig_coords[:, 1] - patch_x0_rel) / patch_width_rel
-    remaining_boxes_y0 = (remaining_boxes_on_orig_coords[:, 2] - patch_y0_rel) / patch_height_rel
-    remaining_boxes_x1 = (remaining_boxes_on_orig_coords[:, 1] + remaining_boxes_on_orig_coords[:, 3] - patch_x0_rel) / patch_width_rel
-    remaining_boxes_y1 = (remaining_boxes_on_orig_coords[:, 2] + remaining_boxes_on_orig_coords[:, 4] - patch_y0_rel) / patch_height_rel
+    remaining_boxes_x0 = (remaining_boxes_on_orig_coords[:, 1] - patch_x0_rel) / patch_side_rel
+    remaining_boxes_y0 = (remaining_boxes_on_orig_coords[:, 2] - patch_y0_rel) / patch_side_rel
+    remaining_boxes_x1 = (remaining_boxes_on_orig_coords[:, 1] + remaining_boxes_on_orig_coords[:, 3] - patch_x0_rel) / patch_side_rel
+    remaining_boxes_y1 = (remaining_boxes_on_orig_coords[:, 2] + remaining_boxes_on_orig_coords[:, 4] - patch_y0_rel) / patch_side_rel
     remaining_boxes_x0 = np.maximum(remaining_boxes_x0, 0)  # (n_remaining_boxes)
     remaining_boxes_y0 = np.maximum(remaining_boxes_y0, 0)  # (n_remaining_boxes)
     remaining_boxes_x1 = np.minimum(remaining_boxes_x1, 1)
@@ -274,9 +272,8 @@ def make_patch_shape(img_side, min_scale, max_scale):
     # Convert to relative coordinates:
     x0 = x0 / float(img_side)
     y0 = y0 / float(img_side)
-    patch_width = patch_side / float(img_side)
-    patch_height = patch_side / float(img_side)
-    return x0, y0, patch_width, patch_height
+    patch_side = patch_side / float(img_side)
+    return x0, y0, patch_side
 
 
 

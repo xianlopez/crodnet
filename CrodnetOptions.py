@@ -36,9 +36,9 @@ class CrodnetOptions:
 
 class SingleCellOptions:
     def __init__(self):
-        self.n_images_per_batch = 8
-        self.n_crops_per_image = 10
-        self.n_comparisons_intra = 10
+        self.n_images_per_batch = 16
+        self.n_crops_per_image = 8
+        self.n_comparisons_intra = 8
         self.n_comparisons_inter = 1
 
         self.threshold_ar = 0.05
