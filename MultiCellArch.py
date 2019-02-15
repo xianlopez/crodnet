@@ -34,8 +34,17 @@ class MultiCellArch:
         self.n_comparisons = -1
         self.metric_names = ['mAP']
         self.n_metrics = len(self.metric_names)
+        self.make_comparison_op()
         if (self.opts.debug_train or self.opts.debug_eval) and self.outdir is None:
             raise Exception('outdir must be specified if debugging is True.')
+
+    def make_comparison_op(self):
+        self.CR1 = tf.placeholder(shape=(self.opts.lcr), dtype=tf.float32)
+        self.CR2 = tf.placeholder(shape=(self.opts.lcr), dtype=tf.float32)
+        CRs = tf.stack([self.CR1, self.CR2], axis=-1)  # (lcr, 2)
+        CRs = tf.expand_dims(CRs, axis=0)  # (1, lcr, 2)
+        self.comparison_op = network.comparison(CRs, self.opts.lcr)  # (1, 2)
+        self.comparison_op = tf.squeeze(self.comparison_op)  # (2
 
     def get_expected_num_boxes(self):
         expected_n_boxes = 0

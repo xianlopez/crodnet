@@ -62,3 +62,8 @@ class SingleCellOptions:
 
         self.debug_train = False
         self.debug_eval = False
+
+
+class MultiCellOptions:
+    def __init__(self):
+        pass

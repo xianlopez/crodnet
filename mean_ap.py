@@ -75,23 +75,6 @@ def precision_recall_curve(predictions_matches, n_objects):
 
 # Rectified precision.
 # At a given point, this is the maximum precision at that point and all with a higher recall.
-# def rectify_precision(precision):
-#     logging.debug('Rectifying precision...')
-#     ini = time.time()
-#     precision_rect = []
-#     npoints = len(precision)
-#     for i in range(npoints):
-#         max_prec = precision[i]
-#         for j in range(i, npoints):
-#             max_prec = max(max_prec, precision[j])
-#         precision_rect.append(max_prec)
-#     lapse = time.time() - ini
-#     logging.debug('Precision rectified in ' + str(lapse) + ' s.')
-#     return precision_rect
-
-
-# Rectified precision.
-# At a given point, this is the maximum precision at that point and all with a higher recall.
 def rectify_precision(precision):
     # logging.debug('Rectifying precision...')
     ini = time.time()
@@ -124,7 +107,7 @@ def interpolate_pr_curve(precision, recall, mean_ap_opts):
     return recall_interp, precision_interp
 
 
-def compute_mAP(predictions, labels, classnames, args):
+def compute_mAP(predictions, labels, classnames, opts):
     # predictions (nimages) List with the predicted bounding boxes of each image.
     # labels (nimages) List with the ground truth boxes of each image.
     logging.debug('Computing mean average precision...')
@@ -160,7 +143,7 @@ def compute_mAP(predictions, labels, classnames, args):
                 for l in range(len(gtlist_img_class)):
                     if l not in gt_used:
                         iou = tools.compute_iou(predboxes_img_class[k].get_coords(), gtlist_img_class[l].get_coords())
-                        if iou >= args.threshold_iou_map:
+                        if iou >= opts.threshold_iou_map:
                             iou_list.append(iou)
                             iou_idx.append(l)
                 if len(iou_list) > 0:
@@ -196,13 +179,13 @@ def compute_mAP(predictions, labels, classnames, args):
             precision_rect = rectify_precision(precision)
 
             # Interpolate precision-recall curve:
-            recall_interp, precision_interp = interpolate_pr_curve(precision_rect, recall, args.mean_ap_opts)
+            recall_interp, precision_interp = interpolate_pr_curve(precision_rect, recall, opts.mean_ap_opts)
 
             # Average precision:
             AP = 1 / len(recall_interp) * np.sum(precision_interp)
 
             # Plot curve:
-            plot_pr_curve(recall, precision_rect, recall_interp, precision_interp, thresholds, classnames[cl], AP, args.outdir, args.mean_ap_opts)
+            plot_pr_curve(recall, precision_rect, recall_interp, precision_interp, thresholds, classnames[cl], AP, opts.outdir, opts.mean_ap_opts)
 
             precision_allclasses.append(precision)
             precision_rec_allclasses.append(precision_rect)

@@ -257,7 +257,10 @@ class TrainEnv:
 
     # ------------------------------------------------------------------------------------------------------------------
     def generate_graph(self):
-        self.single_cell_arch = SingleCellArch.SingleCellArch(self.opts.single_cell_opts, TrainDataReader.get_n_classes(self.opts), self.opts.outdir)
+        dirdata = os.path.join(self.opts.root_of_datasets, self.opts.dataset_name)
+        img_extension, self.classnames = tools.process_dataset_config(os.path.join(dirdata, 'dataset_info.xml'))
+        self.nclasses = len(self.classnames)
+        self.single_cell_arch = SingleCellArch.SingleCellArch(self.opts.single_cell_opts, self.nclasses, self.opts.outdir)
         self.define_inputs_and_labels()
         _, self.loss, self.metrics = self.single_cell_arch.make(self.inputs, self.labels, self.filenames)
         self.model_variables = [n.name for n in tf.global_variables()]
@@ -278,13 +281,7 @@ class TrainEnv:
         with tf.device('/cpu:0'):
             self.reader = TrainDataReader.TrainDataReader(self.input_shape, self.opts, self.single_cell_arch)
             self.inputs, self.labels, self.filenames = self.reader.build_iterator()
-        self.classnames = self.reader.classnames
-        print('class names before setting')
-        print(self.classnames)
         self.single_cell_arch.set_classnames(self.classnames)
-        print('class names after setting')
-        print(self.classnames)
-        self.nclasses = len(self.classnames)
 
     # ------------------------------------------------------------------------------------------------------------------
     def define_initializer(self):
