@@ -115,7 +115,7 @@ def sample_patch_focusing_on_object(image, bboxes, img_side, obj_idx, max_dc, mi
     # image: (img_side, img_side, 3)
     # bboxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
     patch_x0_rel, patch_y0_rel, patch_side_rel = make_patch_shape_focusing_on_object(bboxes[obj_idx, :], max_dc, min_ar)
-    patch, remaining_boxes = sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_side_rel, patch_side_rel)
+    patch, remaining_boxes = sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_side_rel)
     # patch: (patch_side_abs, patch_side_abs, 3)
     # remaining_boxes: (n_remaining_boxes, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
     return patch, remaining_boxes
