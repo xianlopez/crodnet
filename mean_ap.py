@@ -6,6 +6,7 @@ import tools
 import operator
 import os
 
+
 class MeanAPOpts:
     npoints_interp = 100
     epsilon = 1e-6
@@ -143,7 +144,7 @@ def compute_mAP(predictions, labels, classnames, opts):
                 for l in range(len(gtlist_img_class)):
                     if l not in gt_used:
                         iou = tools.compute_iou(predboxes_img_class[k].get_coords(), gtlist_img_class[l].get_coords())
-                        if iou >= opts.threshold_iou_map:
+                        if iou >= opts.threshold_iou:
                             iou_list.append(iou)
                             iou_idx.append(l)
                 if len(iou_list) > 0:

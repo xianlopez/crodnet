@@ -35,8 +35,9 @@ class MultiCellEnv:
     def evaluate(self):
         print('')
         logging.info('Start evaluation')
-        images_dir = os.path.join(self.opts.outdir, 'images')
-        os.makedirs(images_dir)
+        if self.opts.write_results:
+            images_dir = os.path.join(self.opts.outdir, 'images')
+            os.makedirs(images_dir)
         with tf.Session(config=tools.get_config_proto(self.opts.gpu_memory_fraction)) as sess:
             self.restore_fn(sess)
             logging.info('Computing metrics on ' + self.split + ' data')
@@ -165,6 +166,10 @@ class MultiCellEnv:
                     pred_box = BoundingBoxes.PredictedBox(localizations[img_idx, box_idx], pred_class, sofmtax[img_idx, box_idx, pred_class])
                     img_pred_boxes.append(pred_box)
             batch_pred_boxes.append(img_pred_boxes)
+
+        # Mark True and False positives:
+        batch_pred_boxes = mark_true_false_positives(batch_pred_boxes, batch_gt_boxes, self.opts.threshold_iou)
+
         return batch_gt_boxes, batch_pred_boxes
 
 
@@ -235,3 +240,30 @@ def draw_result(img, pred_boxes, gt_boxes, classnames):
         cv2.putText(img, classnames[classid] + ' : %.2f' % conf, (xmin + 5, ymin - 7),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
     return
+
+
+def mark_true_false_positives(pred_boxes, gt_boxes, threshold_iou):
+    nimages = len(pred_boxes)
+    for i in range(nimages):
+        gt_used = []
+        pred_boxes[i].sort(key=operator.attrgetter('confidence'), reverse=True)
+        for idx_pred in range(len(pred_boxes[i])):
+            pred_boxes[i][idx_pred].set_tp(False)
+            iou_vec = np.zeros(len(gt_boxes[i]))
+            class_ids = np.zeros(len(gt_boxes[i]), dtype=np.int32)
+            for idx_lab in range(len(gt_boxes[i])):
+                iou_vec[idx_lab] = tools.compute_iou(pred_boxes[i][idx_pred].get_coords(), gt_boxes[i][idx_lab].get_coords())
+                class_ids[idx_lab] = gt_boxes[i][idx_lab].classid
+            ord_idx = np.argsort(-1 * iou_vec)
+            iou_vec = iou_vec[ord_idx]
+            class_ids = class_ids[ord_idx]
+            for j in range(len(iou_vec)):
+                if iou_vec[j] >= threshold_iou:
+                    if pred_boxes[i][idx_pred].classid == class_ids[j]:
+                        if ord_idx[j] not in gt_used:
+                            pred_boxes[i][idx_pred].set_tp(True)
+                            gt_used.append(ord_idx[j])
+                            break
+                else:
+                    break
+    return pred_boxes

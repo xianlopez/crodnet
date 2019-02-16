@@ -20,7 +20,7 @@ class MultiCellDataReader(CommonDataReader):
 
         self.filenames = self.get_filenames(split)
         self.n_images = len(self.filenames)
-        self.n_batches = self.n_images / self.n_images_per_batch
+        self.n_batches = int(self.n_images / self.n_images_per_batch)
 
         self.reset()
 
@@ -57,8 +57,8 @@ class MultiCellDataReader(CommonDataReader):
             image = self.preprocessor.subtract_mean_np(image)
             batch_images[img_idx, ...] = image
             batch_bboxes.append(bboxes)
-        if self.batch_count > self.n_batches:
-            assert len(self.remaining_filenames) == 0, 'batch_count > n_batches, but remaining_filenames is not empty.'
+        if self.batch_count == self.n_batches:
+            assert len(self.remaining_indices) == 0, 'batch_count > n_batches, but remaining_indices is not empty.'
             end_of_epoch = True
             self.reset()
         return batch_images, batch_bboxes, batch_filenames, end_of_epoch

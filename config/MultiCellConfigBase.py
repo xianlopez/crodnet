@@ -1,5 +1,6 @@
 import CrodnetOptions
 import os
+from mean_ap import MeanAPOpts
 
 
 class MultiCellConfiguration:
@@ -9,6 +10,8 @@ class MultiCellConfiguration:
     weights_file = r''
 
     multi_cell_opts = CrodnetOptions.MultiCellOptions()
+
+    mean_ap_opts = MeanAPOpts()
 
     percent_of_data = 100  # For debbuging. Percentage of data to use. Put 100 if not debbuging
     if os.name == 'nt':  # Windows
@@ -25,9 +28,11 @@ class MultiCellConfiguration:
     gpu_memory_fraction = -1.0
     shuffle_data = True
     nsteps_display = 20
-    write_results = True
+
+    write_results = False
 
     threshold_nms = 0.5
+    threshold_iou = 0.5
 
 
     ##################################

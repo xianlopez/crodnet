@@ -1,6 +1,6 @@
 class MultiCellOptions:
     def __init__(self):
-        self.n_images_per_batch = 1
+        self.n_images_per_batch = 10
         # self.step_in_pixels = 16 # 2^(num of max pools)
         self.step_in_pixels = 32 # 2^(num of max pools)
         self.input_image_size = 288

@@ -7,7 +7,7 @@ class UpdateMultiCellConfiguration(MultiCellConfiguration):
 
     weights_file = '/home/xian/crodnet/experiments/2019/2019_02_14_1/model-23'
 
-    # percent_of_data = 100
+    # percent_of_data = 2
     # buffer_size = 300
     # num_workers = 1
     # root_of_datasets = '/home/xian/datasets'
