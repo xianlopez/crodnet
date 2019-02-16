@@ -7,19 +7,19 @@ import logging
 
 
 class CommonDataReader:
-    def __init__(self, opts):
+    def __init__(self, opts, n_images_per_batch):
         self.dirdata = os.path.join(opts.root_of_datasets, opts.dataset_name)
         self.img_extension, self.classnames = tools.process_dataset_config(os.path.join(self.dirdata, 'dataset_info.xml'))
         self.img_extension = '.' + self.img_extension
         self.max_image_size = opts.max_image_size
         self.percent_of_data = opts.percent_of_data
         self.shuffle_data = opts.shuffle_data
-        self.n_images_per_batch = opts.single_cell_opts.n_images_per_batch
+        self.n_images_per_batch = n_images_per_batch
 
     def read_image_with_bboxes(self, filename):
         dirimg = os.path.join(self.dirdata, "images")
         dirann = os.path.join(self.dirdata, "annotations")
-        filename = filename.decode(sys.getdefaultencoding())
+        # filename = filename.decode(sys.getdefaultencoding())
         try:
             imagefile = os.path.join(dirimg, filename + self.img_extension)
             image = cv2.imread(imagefile).astype(np.float32)

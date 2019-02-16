@@ -1,10 +1,13 @@
-class CrodnetOptions:
+class MultiCellOptions:
     def __init__(self):
+        self.n_images_per_batch = 1
         # self.step_in_pixels = 16 # 2^(num of max pools)
         self.step_in_pixels = 32 # 2^(num of max pools)
         self.input_image_size = 288
         self.grid_levels_size_pad = [
-            (288, 0)
+            (288, 96),
+            (352, 64),
+            (416, 32)
         ]
         self.threshold_ar = 0.05
         self.threshold_pc = 0.99
@@ -63,7 +66,3 @@ class SingleCellOptions:
         self.debug_train = False
         self.debug_eval = False
 
-
-class MultiCellOptions:
-    def __init__(self):
-        pass

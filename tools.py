@@ -8,6 +8,7 @@ import numpy as np
 import cv2
 from lxml import etree
 import tensorflow as tf
+import importlib
 import matplotlib
 matplotlib.use('Agg') # To avoid exception 'async handler deleted by the wrong thread'
 from matplotlib import pyplot as plt
@@ -126,6 +127,87 @@ def plot_training_history(train_metrics, train_loss, val_metrics, val_loss, metr
 
 
 # ----------------------------------------------------------------------------------------------------------------------
+def import_config_files(inline_args, configModuleName, class2load):
+
+    if inline_args.conf is not None:
+        configModuleName = configModuleName + '_' + inline_args.conf
+        configModuleNameAndPath = "config." + configModuleName
+    else:
+        configModuleNameAndPath = configModuleName
+
+    try:
+        currentConfiguration = getattr(importlib.import_module(configModuleNameAndPath), class2load)
+    except:
+        if inline_args.conf is not None:
+            print('.' + os.sep + 'config' + os.sep + configModuleName + ' configuration file NOT found, or ' + class2load +
+                  ' class not defined.')
+        else:
+            print(configModuleName + ' configuration file NOT found, or ' + class2load + ' class not defined.')
+        raise
+
+    return currentConfiguration
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+def common_stuff(inline_args, configModuleName, class2load):
+
+    # Set visible GPU:
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(inline_args.gpu)
+
+    # Import appropriate config file as interactive module loading:
+    currentConfiguration = import_config_files(inline_args, configModuleName, class2load)
+
+    # Get arguments from current configuration:
+    opts = currentConfiguration()
+
+    # Set level of TensorFlow logger:
+    if opts.tf_log_level == 'SILENT':
+        level = 3
+    elif opts.tf_log_level == 'ERROR':
+        level = 2
+    elif opts.tf_log_level == 'WARNING':
+        level = 1
+    elif opts.tf_log_level == 'INFO':
+        level = 0
+    else:
+        err_msg = 'TensorFlow log level not understood.'
+        logging.error(err_msg)
+        raise Exception(err_msg)
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = str(level)
+
+    # Create experiment folder:
+    if opts.experiments_folder[0] == '.':  # Relative path
+        opts.experiments_folder = os.path.join(os.getcwd(), opts.experiments_folder[2:])
+        opts.outdir = create_experiment_folder(opts)
+    # Configure logger:
+    configure_logging(opts)
+
+    # Copy configuration file to the exeperiment folder:
+    try:
+        copy_config(opts, inline_args, configModuleName)
+    except Exception as ex:
+        err_msg = 'Error copying config file.'
+        logging.error(err_msg)
+        logging.error(ex)
+        raise Exception(err_msg)
+
+    # Set random seed:
+    if opts.random_seed is not None:
+        tf.set_random_seed(opts.random_seed)
+        np.random.seed(opts.random_seed)
+
+    return opts
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+def add_mean_again(image):
+    mean = [123.0, 117.0, 104.0]
+    mean = np.reshape(mean, [1, 1, 3])
+    image = image + mean
+    return image
+
+
+# ----------------------------------------------------------------------------------------------------------------------
 def compute_iou(box1, box2):
     # box coordinates: [xmin, ymin, w, h]
     if np.min(np.array(box1[2:])) < 0 or np.min(np.array(box2[2:])) < 0:
@@ -182,17 +264,7 @@ def create_experiment_folder(args):
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-def copy_config(args, inline_args):
-    if inline_args.run == 'train':
-        configModuleName = 'train_config'
-    elif inline_args.run == 'evaluate':
-        configModuleName = 'eval_config'
-    elif inline_args.run == 'predict':
-        configModuleName = 'predict_config'
-    else:
-        print('Please, select specify a valid execution mode: train / evaluate / predict')
-        raise Exception()
-
+def copy_config(args, inline_args, configModuleName):
     if inline_args.conf is not None:
         configModuleName = configModuleName + '_' + inline_args.conf
         configModuleNameAndPath = os.path.join('config', configModuleName)
@@ -200,7 +272,6 @@ def copy_config(args, inline_args):
         configModuleNameAndPath = configModuleName
 
     configModuleNameAndPath = os.path.join(get_repository_dir(), configModuleNameAndPath + '.py')
-
     copyfile(configModuleNameAndPath, os.path.join(args.outdir, configModuleName + '.py'))
     return
 

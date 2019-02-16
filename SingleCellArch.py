@@ -251,7 +251,7 @@ class SingleCellArch:
             name = filenames_reord[i].decode(sys.getdefaultencoding())
             try:
                 crop = inputs_reord[i, ...]  # (input_image_size, input_image_size, 3)
-                crop = add_mean_again(crop)
+                crop = tools.add_mean_again(crop)
                 label_enc = labels_enc_reord[i, :]
                 gt_class = int(CommonEncoding.get_gt_class(label_enc))
                 gt_coords_enc = CommonEncoding.get_gt_coords(label_enc)
@@ -300,8 +300,8 @@ class SingleCellArch:
             try:
                 crop1 = inputs_reord[idx1, ...]  # (input_image_size, input_image_size, 3)
                 crop2 = inputs_reord[idx2, ...]  # (input_image_size, input_image_size, 3)
-                crop1 = add_mean_again(crop1)
-                crop2 = add_mean_again(crop2)
+                crop1 = tools.add_mean_again(crop1)
+                crop2 = tools.add_mean_again(crop2)
                 # Box of crop 1:
                 label_enc_1 = labels_enc_reord[idx1, :]
                 gt_class_1 = int(CommonEncoding.get_gt_class(label_enc_1))
@@ -409,7 +409,7 @@ class SingleCellArch:
             name = filenames_reord[i].decode(sys.getdefaultencoding())
             try:
                 crop = inputs_reord[i, ...]  # (input_image_size, input_image_size, 3)
-                crop = add_mean_again(crop)
+                crop = tools.add_mean_again(crop)
                 label_enc = labels_enc_reord[i, :]
                 gt_class = int(CommonEncoding.get_gt_class(label_enc))
                 is_match = mask_match[i]
@@ -471,8 +471,8 @@ class SingleCellArch:
                 if is_valid:
                     crop1 = inputs_reord[idx1, ...]  # (input_image_size, input_image_size, 3)
                     crop2 = inputs_reord[idx2, ...]  # (input_image_size, input_image_size, 3)
-                    crop1 = add_mean_again(crop1)
-                    crop2 = add_mean_again(crop2)
+                    crop1 = tools.add_mean_again(crop1)
+                    crop2 = tools.add_mean_again(crop2)
                     # Box of crop 1:
                     label_enc_1 = labels_enc_reord[idx1, :]
                     gt_class_1 = int(CommonEncoding.get_gt_class(label_enc_1))
@@ -793,11 +793,4 @@ def decode_boxes_tf(coords_enc, opts):
     coords_raw = tf.stack([xmin, ymin, width, height], axis=-1)  # (..., 4)
 
     return coords_raw  # (..., 4) [xmin, ymin, width, height]
-
-
-def add_mean_again(image):
-    mean = [123.0, 117.0, 104.0]
-    mean = np.reshape(mean, [1, 1, 3])
-    image = image + mean
-    return image
 

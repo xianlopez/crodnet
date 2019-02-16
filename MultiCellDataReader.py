@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 import Preprocessor
-import CommonDataReader
+from CommonDataReader import CommonDataReader
 import tensorflow as tf
 
 
@@ -11,7 +11,7 @@ class MultiCellDataReader(CommonDataReader):
     # ------------------------------------------------------------------------------------------------------------------
     def __init__(self, input_shape, opts, multi_cell_arch, split):
 
-        super(MultiCellDataReader, self).__init__(opts)
+        super(MultiCellDataReader, self).__init__(opts, opts.multi_cell_opts.n_images_per_batch)
 
         self.multi_cell_arch = multi_cell_arch
         self.input_width = input_shape[0]
@@ -20,7 +20,6 @@ class MultiCellDataReader(CommonDataReader):
 
         self.filenames = self.get_filenames(split)
         self.n_images = len(self.filenames)
-        self.names_indices = np.arange(self.n_images)
         self.n_batches = self.n_images / self.n_images_per_batch
 
         self.reset()
@@ -28,33 +27,35 @@ class MultiCellDataReader(CommonDataReader):
         return
 
     def reset(self):
-        self.remaining_filenames = self.filenames[:]
+        self.remaining_indices = np.arange(self.n_images).tolist()
         self.batch_count = 0
 
     def build_inputs(self):
         inputs = tf.placeholder(shape=(self.n_images_per_batch, self.input_height, self.input_width, 3), dtype=tf.float32)
+        return inputs
 
     def sample_batch_filenames(self):
-        indices = np.random.choice(self.names_indices, size=self.n_images_per_batch, replace=False)
-        batch_filenames = np.take(self.remaining_filenames, indices)  # (n_images_per_batch)
-        for name in batch_filenames:
-            self.remaining_filenames.remove(name)
+        indices = np.random.choice(self.remaining_indices, size=self.n_images_per_batch, replace=False)
+        batch_filenames = np.take(self.filenames, indices)  # (n_images_per_batch)
+        for idx in indices:
+            self.remaining_indices.remove(idx)
         return batch_filenames
 
     def get_next_batch(self):
         end_of_epoch = False
         self.batch_count += 1
         batch_filenames = self.sample_batch_filenames()  # (n_images_per_batch)
-        batch_images = []
+        batch_images = np.zeros(shape=(self.n_images_per_batch, self.input_height, self.input_width, 3), dtype=np.float32)
         batch_bboxes = []
-        for name in batch_filenames:
+        for img_idx in range(self.n_images_per_batch):
+            name = batch_filenames[img_idx]
             image, bboxes = self.read_image_with_bboxes(name)
             # image: (?, ?, 3)
             # bboxes: (n_gt, 7)
             image, bboxes = self.resize_pad_zeros(image, bboxes)
             # image: (input_width, input_height, 3)
             image = self.preprocessor.subtract_mean_np(image)
-            batch_images.append(image)
+            batch_images[img_idx, ...] = image
             batch_bboxes.append(bboxes)
         if self.batch_count > self.n_batches:
             assert len(self.remaining_filenames) == 0, 'batch_count > n_batches, but remaining_filenames is not empty.'

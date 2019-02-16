@@ -1,6 +1,5 @@
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
-import CommonEncoding
 
 
 receptive_field_size = 288
@@ -71,12 +70,11 @@ def common_representation(inputs, lcr):
 
 
 def localization_and_classification_path(net, opts, nclasses):
-    n_channels_final = CommonEncoding.get_last_layer_n_channels(opts, nclasses)
     with tf.variable_scope('vgg_16'):
         with tf.variable_scope('loc_and_classif'):
             with slim.arg_scope([slim.conv2d], reuse=tf.AUTO_REUSE, weights_initializer=tf.initializers.he_normal()):
                 net = slim.conv2d(net, opts.lcr, [1, 1], scope='layer1')
-                net = slim.conv2d(net, n_channels_final, [1, 1], activation_fn=None, normalizer_fn=None, scope='layer2')
+                net = slim.conv2d(net, 4+nclasses, [1, 1], activation_fn=None, scope='layer2')
     return net
 
 
@@ -84,8 +82,11 @@ def comparison(crs, lcr):
     # crs: (n_comparisons, 2, lcr):
     with tf.variable_scope('comparison'):
         subtraction = crs[:, 0, :] - crs[:, 1, :]  # (n_comparisons, lcr)
-        fc1 = tf.layers.dense(subtraction, lcr, activation=tf.nn.relu, name='fc1')  # (n_comparisons, lcr)
-        comparison = tf.layers.dense(fc1, 2, activation=None, use_bias=False, name='fc2')  # (n_comparisons, 2)
+        n_comparisons = tf.shape(subtraction)[0]
+        subtraction_ext = tf.reshape(subtraction, (n_comparisons, 1, 1, lcr))
+        fc1 = slim.conv2d(subtraction_ext, lcr, [1, 1], name='fc1')  # (n_comparisons, 1, 1, lcr)
+        comparison = slim.conv2d(fc1, 2, [1, 1], activation=None, biases_initializer=None, name='fc2')  # (n_comparisons, 1, 1, 2)
+        comparison = tf.squeeze(comparison, axis=[1, 2])
     return comparison
 
 

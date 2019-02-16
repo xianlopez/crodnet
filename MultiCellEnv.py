@@ -9,10 +9,12 @@ import os
 import numpy as np
 import BoundingBoxes
 import mean_ap
+import cv2
+import operator
 
 
 # ======================================================================================================================
-class TrainEnv:
+class MultiCellEnv:
 
     # ------------------------------------------------------------------------------------------------------------------
     def __init__(self, opts, split):
@@ -33,6 +35,8 @@ class TrainEnv:
     def evaluate(self):
         print('')
         logging.info('Start evaluation')
+        images_dir = os.path.join(self.opts.outdir, 'images')
+        os.makedirs(images_dir)
         with tf.Session(config=tools.get_config_proto(self.opts.gpu_memory_fraction)) as sess:
             self.restore_fn(sess)
             logging.info('Computing metrics on ' + self.split + ' data')
@@ -47,12 +51,13 @@ class TrainEnv:
                 if step % self.opts.nsteps_display == 0:
                     print('Step %i / %i' % (step, nbatches))
                 batch_images, batch_bboxes, batch_filenames, end_of_epoch = self.reader.get_next_batch()
-                predictions, CRs = sess.run([self.predictions, self.common_representations],
-                                                              feed_dict={self.inputs: batch_images})
-                # predictions = self.remove_repeated_predictions(predictions, CRs, sess)
+                localizations, sofmtax, CRs = sess.run([self.localizations, self.softmax, self.common_representations],
+                                                       feed_dict={self.inputs: batch_images})
+                # sofmtax = self.remove_repeated_predictions(sofmtax, CRs, sess)
+                batch_gt_boxes, batch_pred_boxes = self.postprocess_gt_and_preds(batch_bboxes, localizations, sofmtax)
+                batch_pred_boxes = non_maximum_suppression_batched(batch_pred_boxes, self.opts.threshold_nms)
                 if self.opts.write_results:
-                    write_results(batch_images, batch_bboxes, batch_filenames, predictions)
-                batch_gt_boxes, batch_pred_boxes = self.postprocess_gt_and_preds(batch_bboxes, predictions)
+                    write_results(batch_images, batch_pred_boxes, batch_gt_boxes, batch_filenames, self.classnames, images_dir)
                 all_gt_boxes.extend(batch_gt_boxes)
                 all_pred_boxes.extend(batch_pred_boxes)
             mAP = mean_ap.compute_mAP(all_pred_boxes, all_gt_boxes, self.classnames, self.opts)
@@ -67,12 +72,11 @@ class TrainEnv:
         dirdata = os.path.join(self.opts.root_of_datasets, self.opts.dataset_name)
         img_extension, self.classnames = tools.process_dataset_config(os.path.join(dirdata, 'dataset_info.xml'))
         self.nclasses = len(self.classnames)
-        self.multi_cell_arch = MultiCellArch.MultiCellArch(self.opts.single_cell_opts, self.nclasses, self.opts.outdir)
+        self.multi_cell_arch = MultiCellArch.MultiCellArch(self.opts.multi_cell_opts, self.nclasses)
         self.define_inputs_and_labels()
-        self.predictions, self.common_representations = self.multi_cell_arch.make(self.inputs)
+        self.localizations, self.softmax, self.common_representations = self.multi_cell_arch.make(self.inputs)
         self.restore_fn = tf.contrib.framework.assign_from_checkpoint_fn(self.opts.weights_file, tf.global_variables())
 
-    # ------------------------------------------------------------------------------------------------------------------
     def define_inputs_and_labels(self):
         input_shape = self.multi_cell_arch.get_input_shape()
         with tf.device('/cpu:0'):
@@ -80,19 +84,19 @@ class TrainEnv:
             self.inputs = self.reader.build_inputs()
 
 
-    def remove_repeated_predictions(self, predictions, CRs, sess):
-        # predictions: (batch_size, nboxes, 4+nclasses) [xmin, ymin, width, height, conf1, ..., confN]
+    def remove_repeated_predictions(self, sofmtax, CRs, sess):
+        # TODO: Non me acaba de convencer como esta feita esta funcion...
+        # sofmtax: (batch_size, nboxes, nclasses) [conf1, ..., confN]
         # CRs: (batch_size, nboxes, lcr)
 
         initime = time.time()
         logging.debug('Removing repeated predictions...')
 
-        all_confidences = predictions[..., 4:]  # (batch_size, nboxes, nclasses)
-        pred_class = np.argmax(all_confidences, axis=-1)  # (batch_size, nboxes)
-        max_conf = np.max(all_confidences, axis=-1)  # (batch_size, nboxes)
+        pred_class = np.argmax(sofmtax, axis=-1)  # (batch_size, nboxes)
+        max_conf = np.max(sofmtax, axis=-1)  # (batch_size, nboxes)
         mask_detections = np.logical_not(np.equal(pred_class, self.multi_cell_arch.background_id))
 
-        batch_size = predictions.shape[0]
+        batch_size = sofmtax.shape[0]
         boxes_indices = np.arange(self.multi_cell_arch.n_boxes)
         n_comparisons = 0
         for img_idx in range(batch_size):
@@ -131,16 +135,17 @@ class TrainEnv:
                         comparison = comparison_2_values[0]
                         n_comparisons += 1
                         if comparison < self.opts.comp_th:
-                            predictions[img_idx, idx2, 4:-1] = 0
-                            predictions[img_idx, idx2, -1] = 1
+                            sofmtax[img_idx, idx2, :-1] = 0
+                            sofmtax[img_idx, idx2, -1] = 1
 
         fintime = time.time()
         logging.info('Repeated predictions removed in %.2f s (%d comparisons).' % (fintime - initime, n_comparisons))
-        return
+        return sofmtax
 
-    def postprocess_gt_and_preds(self, bboxes, predictions):
-        # predictions: (batch_size, nboxes, 4+nclasses) [xmin, ymin, width, height, conf1, ..., confN]
+    def postprocess_gt_and_preds(self, bboxes, localizations, sofmtax):
         # bboxes: List of length batch_size, with elements (n_gt, 7) [class_id, x_min, y_min, width, height, pc, gt_idx]
+        # localizations: (batch_size, nboxes, 4) [xmin, ymin, width, height]
+        # sofmtax: (batch_size, nboxes, nclasses) [conf1, ..., confN]
         batch_gt_boxes = []
         batch_pred_boxes = []
         batch_size = len(bboxes)
@@ -149,28 +154,84 @@ class TrainEnv:
             img_gt_boxes = []
             img_bboxes = bboxes[img_idx]
             for gt_idx in range(len(img_bboxes)):
-                gt_box = BoundingBoxes.BoundingBox(img_bboxes[1:5], img_bboxes[0], img_bboxes[5])
+                gt_box = BoundingBoxes.BoundingBox(img_bboxes[gt_idx, 1:5], img_bboxes[gt_idx, 0], img_bboxes[gt_idx, 5])
                 img_gt_boxes.append(gt_box)
             batch_gt_boxes.append(img_gt_boxes)
             # Predicted boxes:
             img_pred_boxes = []
             for box_idx in range(self.multi_cell_arch.n_boxes):
-                pred_class = np.argmin(predictions[img_idx, box_idx, 4:])
+                pred_class = np.argmax(sofmtax[img_idx, box_idx, :])
                 if pred_class != self.multi_cell_arch.background_id:
-                    pred_box = BoundingBoxes.PredictedBox(predictions[img_idx, box_idx, :4], pred_class, predictions[img_idx, box_idx, 4+pred_class])
+                    pred_box = BoundingBoxes.PredictedBox(localizations[img_idx, box_idx], pred_class, sofmtax[img_idx, box_idx, pred_class])
                     img_pred_boxes.append(pred_box)
             batch_pred_boxes.append(img_pred_boxes)
         return batch_gt_boxes, batch_pred_boxes
 
 
-def write_results(images, bboxes, filenames, predictions):
+def non_maximum_suppression_batched(batch_boxes, threshold_nms):
+    batch_remaining_boxes = []
+    batch_size = len(batch_boxes)
+    for img_idx in range(batch_size):
+        remaining_boxes = non_maximum_suppression(batch_boxes[img_idx], threshold_nms)
+        batch_remaining_boxes.append(remaining_boxes)
+    return batch_remaining_boxes
+
+
+def non_maximum_suppression(boxes, threshold_nms):
+    # boxes: List with all the predicted bounding boxes in the image.
+    nboxes = len(boxes)
+    boxes.sort(key=operator.attrgetter('confidence'), reverse=True)
+    for i in range(nboxes):
+        if boxes[i].confidence != -np.inf:
+            for j in range(i + 1, nboxes):
+                if boxes[j].confidence != -np.inf:
+                    if tools.compute_iou(boxes[i].get_coords(), boxes[j].get_coords()) > threshold_nms:
+                        boxes[j].confidence = -np.inf
+    remaining_boxes = [x for x in boxes if x.confidence != -np.inf]
+    return remaining_boxes
+
+
+def write_results(images, pred_boxes, gt_boxes, filenames, classnames, images_dir):
     # images: List of length batch_size, with elements (input_width, input_height, 3)
-    # bboxes: List of length batch_size, with elements (n_gt, 7) [class_id, x_min, y_min, width, height, pc, gt_idx]
-    # filenames: List of length batch_size
-    # predictions: (batch_size, nboxes, 4+nclasses) [xmin, ymin, width, height, conf1, ..., confN]
+    # pred_boxes: List of length batch_size, with lists of PredictedBox objects.
+    # gt_boxes: List of length batch_size, with lists of BoundingBox objects.
+    # filenames: List of length batch_size.
     batch_size = len(images)
     for img_idx in range(batch_size):
         img = images[img_idx]
-        gt = bboxes[img_idx]
+        img = tools.add_mean_again(img)
+        img = np.round(img).astype(np.uint8)
+        this_preds = pred_boxes[img_idx]
+        this_gt = gt_boxes[img_idx]
         name = filenames[img_idx]
-        # TODO
+        dst_path = os.path.join(images_dir, name + '.png')
+        draw_result(img, this_preds, this_gt, classnames)
+        cv2.imwrite(dst_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+
+
+def draw_result(img, pred_boxes, gt_boxes, classnames):
+    # pred_boxes: List of  PredictedBox objects.
+    # gt_boxes: List of  BoundingBox objects.
+    # Draw ground truth:
+    for box in gt_boxes:
+        [xmin, ymin, w, h] = box.get_abs_coords_cv(img)
+        cv2.rectangle(img, (xmin, ymin), (xmin + w, ymin + h), (0, 0, 255), 2)
+    # Draw predictions:
+    for box in pred_boxes:
+        conf = box.confidence
+        [xmin, ymin, w, h] = box.get_abs_coords_cv(img)
+        classid = int(box.classid)
+        # Select color depending if the prediction is a true positive or not:
+        if box.tp == 'yes':
+            color = (0, 255, 0)
+        elif box.tp == 'no':
+            color = (255, 0, 0)
+        else:
+            color = (255, 255, 0)
+        # Draw box:
+        cv2.rectangle(img, (xmin, ymin), (xmin + w, ymin + h), color, 2)
+        cv2.rectangle(img, (xmin, ymin - 20),
+                      (xmin + w, ymin), (125, 125, 125), -1)
+        cv2.putText(img, classnames[classid] + ' : %.2f' % conf, (xmin + 5, ymin - 7),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+    return

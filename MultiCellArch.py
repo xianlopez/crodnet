@@ -14,7 +14,7 @@ import CommonEncoding
 
 
 class MultiCellArch:
-    def __init__(self, options, nclasses, outdir=None):
+    def __init__(self, options, nclasses):
         self.opts = options
         self.nclasses = nclasses + 1 # The last class id is for the background
         self.background_id = self.nclasses - 1
@@ -30,13 +30,10 @@ class MultiCellArch:
         self.input_image_size_w_pad = -1
         self.expected_n_boxes = self.get_expected_num_boxes()
         self.encoded_gt_shape = (self.expected_n_boxes, 9)
-        self.outdir = outdir
         self.n_comparisons = -1
         self.metric_names = ['mAP']
         self.n_metrics = len(self.metric_names)
-        self.make_comparison_op()
-        if (self.opts.debug_train or self.opts.debug_eval) and self.outdir is None:
-            raise Exception('outdir must be specified if debugging is True.')
+        # self.make_comparison_op()
 
     def make_comparison_op(self):
         self.CR1 = tf.placeholder(shape=(self.opts.lcr), dtype=tf.float32)
@@ -44,7 +41,9 @@ class MultiCellArch:
         CRs = tf.stack([self.CR1, self.CR2], axis=-1)  # (lcr, 2)
         CRs = tf.expand_dims(CRs, axis=0)  # (1, lcr, 2)
         self.comparison_op = network.comparison(CRs, self.opts.lcr)  # (1, 2)
-        self.comparison_op = tf.squeeze(self.comparison_op)  # (2
+        self.comparison_op = tf.squeeze(self.comparison_op)  # (2)
+        softmax = tf.nn.softmax(self.comparison_op, axis=-1)  # (2)
+        self.pseudo_distance = softmax[0]  # ()
 
     def get_expected_num_boxes(self):
         expected_n_boxes = 0
@@ -117,7 +116,7 @@ class MultiCellArch:
             grid.set_output_shape(net_shape[1], network.receptive_field_size)
             grid.set_flat_start_pos(self.n_boxes)
             self.max_pad_rel = max(self.max_pad_rel, grid.pad_rel)
-            output_flat = tf.reshape(net, [-1, grid.n_boxes, CommonEncoding.get_last_layer_n_channels(self.opts, self.nclasses)], name='output_flat')
+            output_flat = tf.reshape(net, [-1, grid.n_boxes, 4+self.nclasses], name='output_flat')
             cr_flat = tf.reshape(common_representation, [-1, grid.n_boxes, self.opts.lcr], name='cr_flat')
             self.n_boxes += grid.n_boxes
             all_outputs.append(output_flat)
@@ -125,7 +124,7 @@ class MultiCellArch:
             if (grid.input_size_w_pad - network.receptive_field_size) / self.opts.step_in_pixels + 1 != grid.output_shape:
                 raise Exception('Inconsistent step for input size ' + str(grid.input_size_w_pad) + '. Grid size is ' + str(grid.output_shape) + '.')
         assert self.n_boxes == self.get_expected_num_boxes(), 'Expected number of boxes differs from the real number.'
-        all_outputs = tf.concat(all_outputs, axis=1, name='all_outputs')  # (batch_size, nboxes, ?)
+        all_outputs = tf.concat(all_outputs, axis=1, name='all_outputs')  # (batch_size, nboxes, 4+nclasses)
         all_crs = tf.concat(all_crs, axis=1, name='all_crs')  # (batch_size, nboxes, lcr)
         self.input_image_size_w_pad = int(np.ceil(float(self.opts.input_image_size) / (1 - 2 * self.max_pad_rel)))
         self.max_pad_abs = int(np.round(self.max_pad_rel * self.input_image_size_w_pad))
@@ -162,9 +161,19 @@ class MultiCellArch:
 
     def make(self, inputs):
         inputs_all_sizes = self.make_input_multiscale(inputs)
-        net_output, all_crs = self.net_on_every_size(inputs_all_sizes)  # (batch_size, nboxes, ?)
+        net_output, CRs = self.net_on_every_size(inputs_all_sizes)  # (batch_size, nboxes, ?)
         self.compute_anchors_coordinates()
-        return net_output, all_crs
+        localizations, softmax = self.obtain_localizations_and_softmax(net_output)
+        return localizations, softmax, CRs
+
+    def obtain_localizations_and_softmax(self, net_output):
+        # net_output: (batch_size, nboxes, 4+nclasses)
+        localizations_enc = net_output[:, :, :4]  # (batch_size, nboxes, 4)
+        localizations_dec = self.decode_boxes_tf(localizations_enc)  # (batch_size, nboxes, 4)
+        logits = net_output[:, :, 4:]  # (batch_size, nboxes, nclasses)
+        softmax = tf.nn.softmax(logits, axis=-1)  # (batch_size, nboxes, nclasses)
+        return localizations_dec, softmax
+
 
     def get_grid_idx_from_flat_position(self, position):
         limit = 0
@@ -427,6 +436,60 @@ class MultiCellArch:
         coords_enc = np.stack([dcx_enc, dcy_enc, w_enc, h_enc], axis=1)  # (nboxes, 4)
 
         return coords_enc  # (nboxes, 4) [dcx_enc, dcy_enc, w_enc, h_enc]
+
+    def decode_boxes_tf(self, coords_enc):
+        # coords_enc: (..., 4)
+        dcx_enc = coords_enc[..., 0]
+        dcy_enc = coords_enc[..., 1]
+        w_enc = coords_enc[..., 2]
+        h_enc = coords_enc[..., 3]
+
+        # Decoding step:
+        if self.opts.encoding_method == 'basic_1':
+            dcx_rel = tf.clip_by_value(tf.atan(dcx_enc) / (np.pi / 2.0 - self.opts.enc_epsilon), -1.0, 1.0)
+            dcy_rel = tf.clip_by_value(tf.atan(dcy_enc) / (np.pi / 2.0 - self.opts.enc_epsilon), -1.0, 1.0)
+            w_rel = tf.clip_by_value(CommonEncoding.sigmoid(w_enc) * self.opts.enc_wh_a + self.opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)
+            h_rel = tf.clip_by_value(CommonEncoding.sigmoid(h_enc) * self.opts.enc_wh_a + self.opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)
+        elif self.opts.encoding_method == 'ssd':
+            dcx_rel = tf.clip_by_value(dcx_enc * 0.1, -1.0, 1.0)
+            dcy_rel = tf.clip_by_value(dcy_enc * 0.1, -1.0, 1.0)
+            w_rel = tf.clip_by_value(tf.exp(w_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)
+            h_rel = tf.clip_by_value(tf.exp(h_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)
+        elif self.opts.encoding_method == 'no_encode':
+            dcx_rel = tf.clip_by_value(dcx_enc, -1.0, 1.0)
+            dcy_rel = tf.clip_by_value(dcy_enc, -1.0, 1.0)
+            w_rel = tf.clip_by_value(w_enc, 1.0 / network.receptive_field_size, 1.0)
+            h_rel = tf.clip_by_value(h_enc, 1.0 / network.receptive_field_size, 1.0)
+        else:
+            raise Exception('Encoding method not recognized.')
+
+        xc = self.anchors_xc - dcx_rel * (self.anchors_w * 0.5)  # (nboxes)
+        yc = self.anchors_yc - dcy_rel * (self.anchors_h * 0.5)  # (nboxes)
+
+        width = self.anchors_w * w_rel  # (nboxes)
+        height = self.anchors_h * h_rel  # (nboxes)
+
+        xmin = xc - 0.5 * width  # (nboxes)
+        ymin = yc - 0.5 * height  # (nboxes)
+
+
+        # Remove padding:
+        xmin = (xmin - self.max_pad_rel) / (1 - 2 * self.max_pad_rel)
+        ymin = (ymin - self.max_pad_rel) / (1 - 2 * self.max_pad_rel)
+        width = width / (1 - 2 * self.max_pad_rel)
+        height = height / (1 - 2 * self.max_pad_rel)
+        # Clip:
+        xmin = tf.clip_by_value(xmin, 0.0, 1.0)
+        ymin = tf.clip_by_value(ymin, 0.0, 1.0)
+        width = tf.maximum(0.0, tf.minimum(1.0 - xmin, width))
+        height = tf.maximum(0.0, tf.minimum(1.0 - ymin, height))
+
+
+
+
+        coords_raw = tf.stack([xmin, ymin, width, height], axis=-1)  # (nboxes, 4)
+
+        return coords_raw  # (..., 4) [xmin, ymin, width, height]
 
     def decode_boxes(self, coords_enc):
         # coords_enc: (..., 4)

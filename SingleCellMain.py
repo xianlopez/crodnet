@@ -1,9 +1,6 @@
 import argparse
-import tensorflow as tf
-import numpy as np
 import time
 import os
-import importlib
 import tools
 import logging
 import TrainEnv
@@ -14,13 +11,13 @@ def main(inline_args):
 
     ini_time = time.time()
 
-    args = common_stuff(inline_args)
+    opts = tools.common_stuff(inline_args, 'train_config', 'UpdateTrainConfiguratio')
 
     try:
         if inline_args.run == 'train':
-            train(args)
+            train(opts)
         elif inline_args.run == 'evaluate':
-            evaluate(args, inline_args.split)
+            evaluate(opts, inline_args.split)
         else:
             raise Exception('Please, select specify a valid execution mode: train / evaluate')
 
@@ -34,79 +31,6 @@ def main(inline_args):
         raise
 
     return
-
-
-def import_config_files(inline_args):
-
-    configModuleName = 'train_config'
-    class2load = "UpdateTrainConfiguration"
-
-    if inline_args.conf is not None:
-        configModuleName = configModuleName + '_' + inline_args.conf
-        configModuleNameAndPath = "config." + configModuleName
-    else:
-        configModuleNameAndPath = configModuleName
-
-    try:
-        currentConfiguration = getattr(importlib.import_module(configModuleNameAndPath), class2load)
-    except:
-        if inline_args.conf is not None:
-            print('.' + os.sep + 'config' + os.sep + configModuleName + ' configuration file NOT found, or ' + class2load +
-                  ' class not defined.')
-        else:
-            print(configModuleName + ' configuration file NOT found, or ' + class2load + ' class not defined.')
-        raise
-
-    return currentConfiguration
-
-
-def common_stuff(inline_args):
-
-    # Set visible GPU:
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(inline_args.gpu)
-
-    # Import appropriate config file as interactive module loading:
-    currentConfiguration = import_config_files(inline_args)
-
-    # Get arguments from current configuration:
-    args = currentConfiguration()
-
-    # Set level of TensorFlow logger:
-    if args.tf_log_level == 'SILENT':
-        level = 3
-    elif args.tf_log_level == 'ERROR':
-        level = 2
-    elif args.tf_log_level == 'WARNING':
-        level = 1
-    elif args.tf_log_level == 'INFO':
-        level = 0
-    else:
-        err_msg = 'TensorFlow log level not understood.'
-        logging.error(err_msg)
-        raise Exception(err_msg)
-    os.environ['TF_CPP_MIN_LOG_LEVEL'] = str(level)
-
-    # Create experiment folder:
-    if args.experiments_folder[0] == '.':  # Relative path
-        args.experiments_folder = os.path.join(os.getcwd(), args.experiments_folder[2:])
-    args.outdir = tools.create_experiment_folder(args)
-    # Configure logger:
-    tools.configure_logging(args)
-
-    # Copy configuration file to the exeperiment folder:
-    try:
-        tools.copy_config(args, inline_args)
-    except:
-        err_msg = 'Error copying config file.'
-        logging.error(err_msg)
-        raise Exception(err_msg)
-
-    # Set random seed:
-    if args.random_seed is not None:
-        tf.set_random_seed(args.random_seed)
-        np.random.seed(args.random_seed)
-
-    return args
 
 
 def parse_args():
