@@ -29,6 +29,12 @@ class MultiCellConfiguration:
     shuffle_data = True
     nsteps_display = 20
 
+    # If True, to decide if a box is a detection, compare the maximum confidence of all the classes against the
+    # confidence of background. If the first one is bigger, it is a detection.
+    # If False, the maximum confidence of all classes must be greater than a threshold.
+    detect_against_background = False
+    th_conf = 0.9
+
     write_results = False
 
     threshold_nms = 0.5

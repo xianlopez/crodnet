@@ -1,4 +1,5 @@
 from config.MultiCellConfigBase import MultiCellConfiguration
+import CrodnetOptions
 
 
 class UpdateMultiCellConfiguration(MultiCellConfiguration):
@@ -7,7 +8,11 @@ class UpdateMultiCellConfiguration(MultiCellConfiguration):
 
     weights_file = '/home/xian/crodnet/experiments/2019/2019_02_14_1/model-23'
 
-    # percent_of_data = 2
+    multi_cell_opts = CrodnetOptions.MultiCellOptions()
+
+    write_results = True
+
+    percent_of_data = 10
     # buffer_size = 300
     # num_workers = 1
     # root_of_datasets = '/home/xian/datasets'

@@ -52,10 +52,10 @@ class MultiCellEnv:
                 if step % self.opts.nsteps_display == 0:
                     print('Step %i / %i' % (step, nbatches))
                 batch_images, batch_bboxes, batch_filenames, end_of_epoch = self.reader.get_next_batch()
-                localizations, sofmtax, CRs = sess.run([self.localizations, self.softmax, self.common_representations],
+                localizations, softmax, CRs = sess.run([self.localizations, self.softmax, self.common_representations],
                                                        feed_dict={self.inputs: batch_images})
-                # sofmtax = self.remove_repeated_predictions(sofmtax, CRs, sess)
-                batch_gt_boxes, batch_pred_boxes = self.postprocess_gt_and_preds(batch_bboxes, localizations, sofmtax)
+                # softmax = self.remove_repeated_predictions(softmax, CRs, sess)
+                batch_gt_boxes, batch_pred_boxes = self.postprocess_gt_and_preds(batch_bboxes, localizations, softmax)
                 batch_pred_boxes = non_maximum_suppression_batched(batch_pred_boxes, self.opts.threshold_nms)
                 if self.opts.write_results:
                     write_results(batch_images, batch_pred_boxes, batch_gt_boxes, batch_filenames, self.classnames, images_dir)
@@ -85,19 +85,19 @@ class MultiCellEnv:
             self.inputs = self.reader.build_inputs()
 
 
-    def remove_repeated_predictions(self, sofmtax, CRs, sess):
+    def remove_repeated_predictions(self, softmax, CRs, sess):
         # TODO: Non me acaba de convencer como esta feita esta funcion...
-        # sofmtax: (batch_size, nboxes, nclasses) [conf1, ..., confN]
+        # softmax: (batch_size, nboxes, nclasses) [conf1, ..., confN]
         # CRs: (batch_size, nboxes, lcr)
 
         initime = time.time()
         logging.debug('Removing repeated predictions...')
 
-        pred_class = np.argmax(sofmtax, axis=-1)  # (batch_size, nboxes)
-        max_conf = np.max(sofmtax, axis=-1)  # (batch_size, nboxes)
+        pred_class = np.argmax(softmax, axis=-1)  # (batch_size, nboxes)
+        max_conf = np.max(softmax, axis=-1)  # (batch_size, nboxes)
         mask_detections = np.logical_not(np.equal(pred_class, self.multi_cell_arch.background_id))
 
-        batch_size = sofmtax.shape[0]
+        batch_size = softmax.shape[0]
         boxes_indices = np.arange(self.multi_cell_arch.n_boxes)
         n_comparisons = 0
         for img_idx in range(batch_size):
@@ -136,17 +136,17 @@ class MultiCellEnv:
                         comparison = comparison_2_values[0]
                         n_comparisons += 1
                         if comparison < self.opts.comp_th:
-                            sofmtax[img_idx, idx2, :-1] = 0
-                            sofmtax[img_idx, idx2, -1] = 1
+                            softmax[img_idx, idx2, :-1] = 0
+                            softmax[img_idx, idx2, -1] = 1
 
         fintime = time.time()
         logging.info('Repeated predictions removed in %.2f s (%d comparisons).' % (fintime - initime, n_comparisons))
-        return sofmtax
+        return softmax
 
-    def postprocess_gt_and_preds(self, bboxes, localizations, sofmtax):
+    def postprocess_gt_and_preds(self, bboxes, localizations, softmax):
         # bboxes: List of length batch_size, with elements (n_gt, 7) [class_id, x_min, y_min, width, height, pc, gt_idx]
         # localizations: (batch_size, nboxes, 4) [xmin, ymin, width, height]
-        # sofmtax: (batch_size, nboxes, nclasses) [conf1, ..., confN]
+        # softmax: (batch_size, nboxes, nclasses) [conf1, ..., confN]
         batch_gt_boxes = []
         batch_pred_boxes = []
         batch_size = len(bboxes)
@@ -161,10 +161,18 @@ class MultiCellEnv:
             # Predicted boxes:
             img_pred_boxes = []
             for box_idx in range(self.multi_cell_arch.n_boxes):
-                pred_class = np.argmax(sofmtax[img_idx, box_idx, :])
-                if pred_class != self.multi_cell_arch.background_id:
-                    pred_box = BoundingBoxes.PredictedBox(localizations[img_idx, box_idx], pred_class, sofmtax[img_idx, box_idx, pred_class])
-                    img_pred_boxes.append(pred_box)
+                if self.opts.detect_against_background:
+                    pred_class = np.argmax(softmax[img_idx, box_idx, :])
+                    if pred_class != self.multi_cell_arch.background_id:
+                        pred_box = BoundingBoxes.PredictedBox(localizations[img_idx, box_idx], pred_class, softmax[img_idx, box_idx, pred_class])
+                        img_pred_boxes.append(pred_box)
+                else:
+                    pred_class = np.argmax(softmax[img_idx, box_idx, :-1])
+                    conf = softmax[img_idx, box_idx, pred_class]
+                    if conf > self.opts.th_conf:
+                        pred_box = BoundingBoxes.PredictedBox(localizations[img_idx, box_idx], pred_class, conf)
+                        img_pred_boxes.append(pred_box)
+
             batch_pred_boxes.append(img_pred_boxes)
 
         # Mark True and False positives:
