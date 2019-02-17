@@ -28,6 +28,9 @@ class MultiCellEnv:
         self.nclasses = None
         self.reader = None
 
+        if self.opts.detect_against_background:
+            self.opts.th_conf = None
+
         # Initialize network:
         self.generate_graph()
 
@@ -73,7 +76,7 @@ class MultiCellEnv:
         dirdata = os.path.join(self.opts.root_of_datasets, self.opts.dataset_name)
         img_extension, self.classnames = tools.process_dataset_config(os.path.join(dirdata, 'dataset_info.xml'))
         self.nclasses = len(self.classnames)
-        self.multi_cell_arch = MultiCellArch.MultiCellArch(self.opts.multi_cell_opts, self.nclasses)
+        self.multi_cell_arch = MultiCellArch.MultiCellArch(self.opts.multi_cell_opts, self.nclasses, self.opts.outdir, self.opts.th_conf, self.classnames)
         self.define_inputs_and_labels()
         self.localizations, self.softmax, self.common_representations = self.multi_cell_arch.make(self.inputs)
         self.restore_fn = tf.contrib.framework.assign_from_checkpoint_fn(self.opts.weights_file, tf.global_variables())

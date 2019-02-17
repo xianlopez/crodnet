@@ -27,6 +27,8 @@ class MultiCellOptions:
         self.loc_loss_factor = 1
         self.comp_loss_factor = 0.5
 
+        self.debug = False
+
         self.enc_epsilon = 1e-5
         self.enc_wh_a = 2
         self.enc_wh_b = 0.5 * (1 - self.enc_wh_a)

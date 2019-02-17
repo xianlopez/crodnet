@@ -14,7 +14,7 @@ import CommonEncoding
 
 
 class MultiCellArch:
-    def __init__(self, options, nclasses):
+    def __init__(self, options, nclasses, outdir, th_conf, classnames):
         self.opts = options
         self.nclasses = nclasses + 1 # The last class id is for the background
         self.background_id = self.nclasses - 1
@@ -34,6 +34,12 @@ class MultiCellArch:
         self.metric_names = ['mAP']
         self.n_metrics = len(self.metric_names)
         # self.make_comparison_op()
+        self.batch_count_debug = 0
+        self.th_conf = th_conf
+        self.classnames = classnames
+        if self.opts.debug:
+            self.debug_dir = os.path.join(outdir, 'debug')
+            os.makedirs(self.debug_dir)
 
     def make_comparison_op(self):
         self.CR1 = tf.placeholder(shape=(self.opts.lcr), dtype=tf.float32)
@@ -163,6 +169,12 @@ class MultiCellArch:
         inputs_all_sizes = self.make_input_multiscale(inputs)
         net_output, CRs = self.net_on_every_size(inputs_all_sizes)  # (batch_size, nboxes, ?)
         self.compute_anchors_coordinates()
+        if self.opts.debug:
+            debug_inputs = [net_output]
+            debug_inputs.extend(inputs_all_sizes)
+            net_output_shape = net_output.shape
+            net_output = tf.py_func(self.write_debug_info, debug_inputs, (tf.float32))
+            net_output.set_shape(net_output_shape)
         localizations, softmax = self.obtain_localizations_and_softmax(net_output)
         return localizations, softmax, CRs
 
@@ -664,6 +676,55 @@ class MultiCellArch:
         dc = np.minimum(dc, np.sqrt(2.0))
 
         return pc, ar, dc
+
+    def write_debug_info(self, *arg):
+        # arg: [net_output, inputs0, ..., inputsN]
+        # net_output: (batch_size, nboxes, 4+nclasses)
+        # inputsX: (batch_size, height, width, 3)
+        net_output = arg[0]
+        inputs_all_sizes = []
+        for i in range(1, len(arg)):
+            inputs_all_sizes.append(arg[i])
+        batch_size = net_output.shape[0]
+        localizations_enc = net_output[..., :4]  # (batch_size, nboxes, 4)
+        logits = net_output[..., 4:]  # (batch_size, nboxes, nclasses)
+        e_x = np.exp(logits - np.max(logits))  # (batch_size, nboxes, nclasses)
+        denominator = np.tile(np.sum(e_x, axis=-1, keepdims=True), [1, 1, self.nclasses])  # (batch_size, nboxes, nclasses)
+        softmax = e_x / denominator  # (batch_size, nboxes, nclasses)
+        # softmax = tf.nn.softmax(logits, axis=-1)  # (batch_size, nboxes, nclasses)
+        self.batch_count_debug += 1
+        batch_dir = os.path.join(self.debug_dir, 'batch' + str(self.batch_count_debug))
+        os.makedirs(batch_dir)
+        for pos in range(self.n_boxes):
+            grid_idx = self.get_grid_idx_from_flat_position(pos)
+            inputs_this_box = inputs_all_sizes[grid_idx]  # (batch_size, height, width, 3)
+            anchor_coords = self.get_anchor_coords_wrt_its_input(pos, True)  # [xmin, ymin, xmax, ymax]
+            anc_xmin = anchor_coords[0]
+            anc_ymin = anchor_coords[1]
+            anc_xmax = anchor_coords[2]
+            anc_ymax = anchor_coords[3]
+            for img_idx in range(batch_size):
+                img = inputs_this_box[img_idx, anc_ymin:anc_ymax, anc_xmin:anc_xmax].copy()  # (receptive_field_size, receptive_field_size, 3)
+                img = tools.add_mean_again(img)
+                path_to_save = os.path.join(batch_dir, 'img' + str(img_idx) + '_pos' + str(pos) + '.png')
+                coords_enc = localizations_enc[img_idx, pos, :]  # (4)
+                coords_dec = CommonEncoding.decode_boxes_np(coords_enc, self.opts)  # (4)
+                if self.th_conf is None:
+                    predicted_class = np.argmax(softmax[img_idx, pos, :])
+                    if predicted_class != self.background_id:
+                        conf = softmax[img_idx, pos, predicted_class]
+                        bbox = np.concatenate([np.expand_dims(predicted_class, axis=0), coords_dec, np.expand_dims(conf, axis=0)], axis=0)  # (5)
+                        bbox = np.expand_dims(bbox, axis=0)  # (1, 5)
+                        img = tools.add_bounding_boxes_to_image2(img, bbox, self.classnames, color=(127, 0, 127))
+                else:
+                    predicted_class = np.argmax(softmax[img_idx, pos, :-1])
+                    max_conf_no_bkg = softmax[img_idx, pos, predicted_class]
+                    if max_conf_no_bkg > self.th_conf:
+                        bbox = np.concatenate([np.expand_dims(predicted_class, axis=0), coords_dec, np.expand_dims(max_conf_no_bkg, axis=0)], axis=0)  # (5)
+                        bbox = np.expand_dims(bbox, axis=0)  # (1, 5)
+                        img = tools.add_bounding_boxes_to_image2(img, bbox, self.classnames, color=(127, 0, 127))
+                cv2.imwrite(path_to_save, cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_RGB2BGR))
+        return net_output
 
 
 def compute_iou_multi_dim(boxes1, boxes2):

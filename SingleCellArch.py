@@ -255,7 +255,7 @@ class SingleCellArch:
                 label_enc = labels_enc_reord[i, :]
                 gt_class = int(CommonEncoding.get_gt_class(label_enc))
                 gt_coords_enc = CommonEncoding.get_gt_coords(label_enc)
-                gt_coords_dec = decode_boxes_np(gt_coords_enc, self.opts)
+                gt_coords_dec = CommonEncoding.decode_boxes_np(gt_coords_enc, self.opts)
                 is_match = mask_match[i]
                 is_neutral = mask_neutral[i]
                 predicted_class = np.argmax(loc_and_classif[i, 4:])
@@ -271,7 +271,7 @@ class SingleCellArch:
                     else:
                         assert not is_match, 'is_match is True, and gt_class it background_id.'
                     predicted_coords_enc = loc_and_classif[i, :4]
-                    predicted_coords_dec = decode_boxes_np(predicted_coords_enc, self.opts)
+                    predicted_coords_dec = CommonEncoding.decode_boxes_np(predicted_coords_enc, self.opts)
                     if predicted_class != self.background_id:
                         class_and_coords = np.concatenate([np.expand_dims(predicted_class, axis=0), predicted_coords_dec], axis=0)  # (5)
                         class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
@@ -306,7 +306,7 @@ class SingleCellArch:
                 label_enc_1 = labels_enc_reord[idx1, :]
                 gt_class_1 = int(CommonEncoding.get_gt_class(label_enc_1))
                 gt_coords_enc_1 = CommonEncoding.get_gt_coords(label_enc_1)
-                gt_coords_dec_1 = decode_boxes_np(gt_coords_enc_1, self.opts)
+                gt_coords_dec_1 = CommonEncoding.decode_boxes_np(gt_coords_enc_1, self.opts)
                 if gt_class_1 != self.background_id:
                     class_and_coords = np.concatenate([np.expand_dims(gt_class_1, axis=0), gt_coords_dec_1], axis=0)  # (5)
                     class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
@@ -315,7 +315,7 @@ class SingleCellArch:
                 label_enc_2 = labels_enc_reord[idx2, :]
                 gt_class_2 = int(CommonEncoding.get_gt_class(label_enc_2))
                 gt_coords_enc_2 = CommonEncoding.get_gt_coords(label_enc_2)
-                gt_coords_dec_2 = decode_boxes_np(gt_coords_enc_2, self.opts)
+                gt_coords_dec_2 = CommonEncoding.decode_boxes_np(gt_coords_enc_2, self.opts)
                 if gt_class_2 != self.background_id:
                     class_and_coords = np.concatenate([np.expand_dims(gt_class_2, axis=0), gt_coords_dec_2], axis=0)  # (5)
                     class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
@@ -425,7 +425,7 @@ class SingleCellArch:
 
                     if gt_class != self.background_id:
                         gt_coords_enc = CommonEncoding.get_gt_coords(label_enc)
-                        gt_coords_dec = decode_boxes_np(gt_coords_enc, self.opts)
+                        gt_coords_dec = CommonEncoding.decode_boxes_np(gt_coords_enc, self.opts)
                         class_and_coords = np.concatenate([np.expand_dims(gt_class, axis=0), gt_coords_dec], axis=0)  # (5)
                         class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
                         crop = tools.add_bounding_boxes_to_image(crop, class_and_coords, color=(255, 0, 0))
@@ -433,7 +433,7 @@ class SingleCellArch:
                         assert not is_match, 'is_match is True, and gt_class it background_id.'
                     if predicted_class != self.background_id:
                         predicted_coords_enc = loc_and_classif[i, :4]
-                        predicted_coords_dec = decode_boxes_np(predicted_coords_enc, self.opts)
+                        predicted_coords_dec = CommonEncoding.decode_boxes_np(predicted_coords_enc, self.opts)
                         class_and_coords = np.concatenate([np.expand_dims(predicted_class, axis=0), predicted_coords_dec], axis=0)  # (5)
                         class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
                         crop = tools.add_bounding_boxes_to_image(crop, class_and_coords, color=(127, 0, 127))
@@ -479,7 +479,7 @@ class SingleCellArch:
                     gt_idx_1 = int(CommonEncoding.get_nearest_valid_gt_idx(label_enc_1))
                     if gt_class_1 != self.background_id:
                         gt_coords_enc_1 = CommonEncoding.get_gt_coords(label_enc_1)
-                        gt_coords_dec_1 = decode_boxes_np(gt_coords_enc_1, self.opts)
+                        gt_coords_dec_1 = CommonEncoding.decode_boxes_np(gt_coords_enc_1, self.opts)
                         class_and_coords = np.concatenate([np.expand_dims(gt_class_1, axis=0), gt_coords_dec_1], axis=0)  # (5)
                         class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
                         crop1 = tools.add_bounding_boxes_to_image(crop1, class_and_coords, color=(255, 0, 0))
@@ -489,7 +489,7 @@ class SingleCellArch:
                     gt_idx_2 = int(CommonEncoding.get_nearest_valid_gt_idx(label_enc_2))
                     if gt_class_2 != self.background_id:
                         gt_coords_enc_2 = CommonEncoding.get_gt_coords(label_enc_2)
-                        gt_coords_dec_2 = decode_boxes_np(gt_coords_enc_2, self.opts)
+                        gt_coords_dec_2 = CommonEncoding.decode_boxes_np(gt_coords_enc_2, self.opts)
                         class_and_coords = np.concatenate([np.expand_dims(gt_class_2, axis=0), gt_coords_dec_2], axis=0)  # (5)
                         class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
                         crop2 = tools.add_bounding_boxes_to_image(crop2, class_and_coords, color=(255, 0, 0))
@@ -721,42 +721,6 @@ def encode_boxes_np(coords_raw, opts):
     coords_enc = np.stack([dcx_enc, dcy_enc, w_enc, h_enc], axis=0)  # (4)
 
     return coords_enc  # (4) [dcx_enc, dcy_enc, w_enc, h_enc]
-
-def decode_boxes_np(coords_enc, opts):
-    # coords_enc: (..., 4)
-    dcx_enc = coords_enc[..., 0]
-    dcy_enc = coords_enc[..., 1]
-    w_enc = coords_enc[..., 2]
-    h_enc = coords_enc[..., 3]
-
-    # Decoding step:
-    if opts.encoding_method == 'basic_1':
-        dcx_rel = np.clip(np.arctan(dcx_enc) / (np.pi / 2.0 - opts.enc_epsilon), -1.0, 1.0)
-        dcy_rel = np.clip(np.arctan(dcy_enc) / (np.pi / 2.0 - opts.enc_epsilon), -1.0, 1.0)
-        width = np.clip(CommonEncoding.sigmoid(w_enc) * opts.enc_wh_a + opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)
-        height = np.clip(CommonEncoding.sigmoid(h_enc) * opts.enc_wh_a + opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)
-    elif opts.encoding_method == 'ssd':
-        dcx_rel = np.clip(dcx_enc * 0.1, -1.0, 1.0)
-        dcy_rel = np.clip(dcy_enc * 0.1, -1.0, 1.0)
-        width = np.clip(np.exp(w_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)
-        height = np.clip(np.exp(h_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)
-    elif opts.encoding_method == 'no_encode':
-        dcx_rel = np.clip(dcx_enc, -1.0, 1.0)
-        dcy_rel = np.clip(dcy_enc, -1.0, 1.0)
-        width = np.clip(w_enc, 1.0 / network.receptive_field_size, 1.0)
-        height = np.clip(h_enc, 1.0 / network.receptive_field_size, 1.0)
-    else:
-        raise Exception('Encoding method not recognized.')
-
-    xc = 0.5 - dcx_rel * 0.5  # (...)
-    yc = 0.5 - dcy_rel * 0.5  # (...)
-
-    xmin = xc - 0.5 * width  # (...)
-    ymin = yc - 0.5 * height  # (...)
-
-    coords_raw = np.stack([xmin, ymin, width, height], axis=-1)  # (..., 4)
-
-    return coords_raw  # (..., 4) [xmin, ymin, width, height]
 
 def decode_boxes_tf(coords_enc, opts):
     # coords_enc: (..., 4)

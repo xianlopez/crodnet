@@ -1,5 +1,43 @@
 import tensorflow as tf
 import numpy as np
+import network
+
+
+def decode_boxes_np(coords_enc, opts):
+    # coords_enc: (..., 4)
+    dcx_enc = coords_enc[..., 0]
+    dcy_enc = coords_enc[..., 1]
+    w_enc = coords_enc[..., 2]
+    h_enc = coords_enc[..., 3]
+
+    # Decoding step:
+    if opts.encoding_method == 'basic_1':
+        dcx_rel = np.clip(np.arctan(dcx_enc) / (np.pi / 2.0 - opts.enc_epsilon), -1.0, 1.0)
+        dcy_rel = np.clip(np.arctan(dcy_enc) / (np.pi / 2.0 - opts.enc_epsilon), -1.0, 1.0)
+        width = np.clip(sigmoid(w_enc) * opts.enc_wh_a + opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)
+        height = np.clip(sigmoid(h_enc) * opts.enc_wh_a + opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)
+    elif opts.encoding_method == 'ssd':
+        dcx_rel = np.clip(dcx_enc * 0.1, -1.0, 1.0)
+        dcy_rel = np.clip(dcy_enc * 0.1, -1.0, 1.0)
+        width = np.clip(np.exp(w_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)
+        height = np.clip(np.exp(h_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)
+    elif opts.encoding_method == 'no_encode':
+        dcx_rel = np.clip(dcx_enc, -1.0, 1.0)
+        dcy_rel = np.clip(dcy_enc, -1.0, 1.0)
+        width = np.clip(w_enc, 1.0 / network.receptive_field_size, 1.0)
+        height = np.clip(h_enc, 1.0 / network.receptive_field_size, 1.0)
+    else:
+        raise Exception('Encoding method not recognized.')
+
+    xc = 0.5 - dcx_rel * 0.5  # (...)
+    yc = 0.5 - dcy_rel * 0.5  # (...)
+
+    xmin = xc - 0.5 * width  # (...)
+    ymin = yc - 0.5 * height  # (...)
+
+    coords_raw = np.stack([xmin, ymin, width, height], axis=-1)  # (..., 4)
+
+    return coords_raw  # (..., 4) [xmin, ymin, width, height]
 
 
 def split_net_output_tf(net_output, opts, nclasses):

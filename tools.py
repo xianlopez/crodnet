@@ -243,6 +243,24 @@ def add_bounding_boxes_to_image(image, bboxes, color=(0,0,255), line_width=2):
 
 
 # ----------------------------------------------------------------------------------------------------------------------
+def add_bounding_boxes_to_image2(image, bboxes, classnames, color=(0,0,255), line_width=2):
+    # bboxes: (nboxes, 6) [class_id, xmin, ymin, width, height, conf] in relative coordinates
+    height = image.shape[0]
+    width = image.shape[1]
+    for i in range(bboxes.shape[0]):
+        xmin = int(np.round(bboxes[i, 1] * width))
+        ymin = int(np.round(bboxes[i, 2] * height))
+        w = int(np.round(bboxes[i, 3] * width))
+        h = int(np.round(bboxes[i, 4] * height))
+        classid = int(bboxes[i, 0])
+        conf = bboxes[i, 5]
+        cv2.rectangle(image, (xmin, ymin), (xmin + w, ymin + h), color, line_width)
+        cv2.putText(image, classnames[classid] + ' : %.2f' % conf, (xmin + 5, ymin - 7),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+    return image
+
+
+# ----------------------------------------------------------------------------------------------------------------------
 def create_experiment_folder(args):
     year = time.strftime('%Y')
     month = time.strftime('%m')
