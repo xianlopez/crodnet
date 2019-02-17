@@ -42,8 +42,6 @@ class TrainConfiguration:
 
     data_aug_opts = DataAugOpts()
 
-    crodnet_opts = CrodnetOptions.CrodnetOptions()
-
     single_cell_opts = CrodnetOptions.SingleCellOptions()
 
     image_cropper_opts = ImageCropperOptions()

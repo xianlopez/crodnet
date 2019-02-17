@@ -84,8 +84,8 @@ def comparison(crs, lcr):
         subtraction = crs[:, 0, :] - crs[:, 1, :]  # (n_comparisons, lcr)
         n_comparisons = tf.shape(subtraction)[0]
         subtraction_ext = tf.reshape(subtraction, (n_comparisons, 1, 1, lcr))
-        fc1 = slim.conv2d(subtraction_ext, lcr, [1, 1], name='fc1')  # (n_comparisons, 1, 1, lcr)
-        comparison = slim.conv2d(fc1, 2, [1, 1], activation=None, biases_initializer=None, name='fc2')  # (n_comparisons, 1, 1, 2)
+        fc1 = slim.conv2d(subtraction_ext, lcr, [1, 1], scope='fc1')  # (n_comparisons, 1, 1, lcr)
+        comparison = slim.conv2d(fc1, 2, [1, 1], activation_fn=None, biases_initializer=None, scope='fc2')  # (n_comparisons, 1, 1, 2)
         comparison = tf.squeeze(comparison, axis=[1, 2])
     return comparison
 

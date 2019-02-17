@@ -4,7 +4,7 @@ import Preprocessor
 import DataAugmentation
 import ImageCropper
 import network
-import CommonDataReader
+from CommonDataReader import CommonDataReader
 
 
 # ======================================================================================================================
@@ -12,7 +12,7 @@ class TrainDataReader(CommonDataReader):
     # ------------------------------------------------------------------------------------------------------------------
     def __init__(self, input_shape, opts, single_cell_arch):
 
-        super(TrainDataReader, self).__init__(opts)
+        super(TrainDataReader, self).__init__(opts, opts.single_cell_opts.n_images_per_batch)
 
         self.single_cell_arch = single_cell_arch
         self.n_crops_per_image = opts.single_cell_opts.n_crops_per_image

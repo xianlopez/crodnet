@@ -11,7 +11,7 @@ def main(inline_args):
 
     ini_time = time.time()
 
-    opts = tools.common_stuff(inline_args, 'train_config', 'UpdateTrainConfiguratio')
+    opts = tools.common_stuff(inline_args, 'train_config', 'UpdateTrainConfiguration')
 
     try:
         if inline_args.run == 'train':

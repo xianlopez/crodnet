@@ -19,7 +19,8 @@ class CommonDataReader:
     def read_image_with_bboxes(self, filename):
         dirimg = os.path.join(self.dirdata, "images")
         dirann = os.path.join(self.dirdata, "annotations")
-        # filename = filename.decode(sys.getdefaultencoding())
+        if type(filename) == bytes:
+            filename = filename.decode(sys.getdefaultencoding())
         try:
             imagefile = os.path.join(dirimg, filename + self.img_extension)
             image = cv2.imread(imagefile).astype(np.float32)
