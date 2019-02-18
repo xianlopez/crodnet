@@ -39,6 +39,7 @@ class MultiCellConfiguration:
 
     threshold_nms = 0.5
     threshold_iou = 0.5
+    comp_th = 0.7
 
 
     ##################################

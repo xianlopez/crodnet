@@ -33,7 +33,7 @@ class MultiCellArch:
         self.n_comparisons = -1
         self.metric_names = ['mAP']
         self.n_metrics = len(self.metric_names)
-        # self.make_comparison_op()
+        self.make_comparison_op()
         self.batch_count_debug = 0
         self.th_conf = th_conf
         self.classnames = classnames
@@ -44,8 +44,8 @@ class MultiCellArch:
     def make_comparison_op(self):
         self.CR1 = tf.placeholder(shape=(self.opts.lcr), dtype=tf.float32)
         self.CR2 = tf.placeholder(shape=(self.opts.lcr), dtype=tf.float32)
-        CRs = tf.stack([self.CR1, self.CR2], axis=-1)  # (lcr, 2)
-        CRs = tf.expand_dims(CRs, axis=0)  # (1, lcr, 2)
+        CRs = tf.stack([self.CR1, self.CR2], axis=0)  # (2, lcr)
+        CRs = tf.expand_dims(CRs, axis=0)  # (1, 2, lcr)
         self.comparison_op = network.comparison(CRs, self.opts.lcr)  # (1, 2)
         self.comparison_op = tf.squeeze(self.comparison_op)  # (2)
         softmax = tf.nn.softmax(self.comparison_op, axis=-1)  # (2)
@@ -75,6 +75,30 @@ class MultiCellArch:
         self.anchors_yc = (self.anchors_coordinates[:, 1] + self.anchors_coordinates[:, 3]) / 2.0
         self.anchors_w = self.anchors_coordinates[:, 2] - self.anchors_coordinates[:, 0]
         self.anchors_h = self.anchors_coordinates[:, 3] - self.anchors_coordinates[:, 1]
+
+    def assign_comparisons_between_anchors(self):
+        total_number_of_comparisons = 0
+        self.comparisons_references = []
+        for i in range(self.n_boxes):
+            anchors_to_compare = []
+            for j in range(i+1, self.n_boxes):
+                box1 = np.array([self.anchors_coordinates[i, 0],
+                                 self.anchors_coordinates[i, 1],
+                                 self.anchors_w[i],
+                                 self.anchors_h[i]])  # (xmin, ymin, width, height)
+                box2 = np.array([self.anchors_coordinates[j, 0],
+                                 self.anchors_coordinates[j, 1],
+                                 self.anchors_w[j],
+                                 self.anchors_h[j]])  # (xmin, ymin, width, height)
+                iou = compute_iou_multi_dim(box1, box2)
+                if iou >= self.opts.min_iou_to_compare:
+                    anchors_to_compare.append(j)
+            n_comp_this_anchor = len(anchors_to_compare)
+            total_number_of_comparisons += n_comp_this_anchor
+            print('Anchor ' + str(i) + ': ' + str(n_comp_this_anchor) + ' comparisons.')
+            self.comparisons_references.append(anchors_to_compare)
+        mean_comparisons = total_number_of_comparisons / float(self.n_boxes)
+        print('Mean number of comparisons per anchor: ' + str(mean_comparisons))
 
     def make_input_multiscale(self, inputs):
         inputs_all_sizes = []
@@ -169,6 +193,7 @@ class MultiCellArch:
         inputs_all_sizes = self.make_input_multiscale(inputs)
         net_output, CRs = self.net_on_every_size(inputs_all_sizes)  # (batch_size, nboxes, ?)
         self.compute_anchors_coordinates()
+        self.assign_comparisons_between_anchors()
         if self.opts.debug:
             debug_inputs = [net_output]
             debug_inputs.extend(inputs_all_sizes)

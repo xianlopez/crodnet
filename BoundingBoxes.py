@@ -82,10 +82,11 @@ class BoundingBox:
 
 
 class PredictedBox(BoundingBox):
-    def __init__(self, coords, cl_id, conf):
+    def __init__(self, coords, cl_id, conf, anc_idx=None):
         super(PredictedBox, self).__init__(coords, cl_id)
         self.confidence = conf
         self.tp = 'unknown'
+        self.anc_idx = anc_idx
 
     def set_tp(self, is_tp):
         if is_tp:
