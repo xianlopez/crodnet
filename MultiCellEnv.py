@@ -62,7 +62,8 @@ class MultiCellEnv:
                 batch_pred_boxes = non_maximum_suppression_batched(batch_pred_boxes, self.opts.threshold_nms)
                 batch_pred_boxes = self.remove_repeated_predictions_batched(batch_pred_boxes, CRs, sess)
                 if self.opts.write_results:
-                    write_results(batch_images, batch_pred_boxes, batch_gt_boxes, batch_filenames, self.classnames, images_dir)
+                    write_results(batch_images, batch_pred_boxes, batch_gt_boxes, batch_filenames, self.classnames,
+                                  images_dir, self.opts.write_results, step)
                 all_gt_boxes.extend(batch_gt_boxes)
                 all_pred_boxes.extend(batch_pred_boxes)
             mAP = mean_ap.compute_mAP(all_pred_boxes, all_gt_boxes, self.classnames, self.opts)
@@ -275,7 +276,7 @@ def non_maximum_suppression(boxes, threshold_nms):
     return remaining_boxes
 
 
-def write_results(images, pred_boxes, gt_boxes, filenames, classnames, images_dir):
+def write_results(images, pred_boxes, gt_boxes, filenames, classnames, images_dir, write_results, batch_count):
     # images: List of length batch_size, with elements (input_width, input_height, 3)
     # pred_boxes: List of length batch_size, with lists of PredictedBox objects.
     # gt_boxes: List of length batch_size, with lists of BoundingBox objects.
@@ -288,7 +289,10 @@ def write_results(images, pred_boxes, gt_boxes, filenames, classnames, images_di
         this_preds = pred_boxes[img_idx]
         this_gt = gt_boxes[img_idx]
         name = filenames[img_idx]
-        dst_path = os.path.join(images_dir, name + '.png')
+        file_name = 'img' + str(img_idx) + '_' + name
+        if write_results:
+            file_name = 'batch' + str(batch_count) + '_' + file_name
+        dst_path = os.path.join(images_dir, file_name + '.png')
         draw_result(img, this_preds, this_gt, classnames)
         cv2.imwrite(dst_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
 
