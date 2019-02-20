@@ -118,7 +118,7 @@ class TrainDataReader(CommonDataReader):
         # filename: ()
         crops, labels_enc = tf.py_func(self.image_cropper.take_crops_on_image, [image, bboxes], (tf.float32, tf.float32))
         crops.set_shape((self.n_crops_per_image, network.receptive_field_size, network.receptive_field_size, 3))
-        labels_enc.set_shape((self.n_crops_per_image, 9))
+        labels_enc.set_shape((self.n_crops_per_image, self.single_cell_arch.n_labels))
         # crops, labels_enc = self.image_cropper.take_crops_on_image(image, bboxes)
         # crops: (n_crops_per_image, receptive_field_size, receptive_field_size, 3)
         # labels_enc: (n_crops_per_image, n_labels)

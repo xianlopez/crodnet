@@ -29,7 +29,6 @@ class MultiCellArch:
         self.max_pad_abs = -1
         self.input_image_size_w_pad = -1
         self.expected_n_boxes = self.get_expected_num_boxes()
-        self.encoded_gt_shape = (self.expected_n_boxes, 9)
         self.n_comparisons = -1
         self.metric_names = ['mAP']
         self.n_metrics = len(self.metric_names)

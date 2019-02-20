@@ -44,6 +44,7 @@ class SingleCellArch:
         # inputs: (n_images_per_batch, n_crops_per_image, input_image_size, input_image_size, 3)
         # labels_enc: (n_images_per_batch, n_crops_per_image, n_labels)
         # filenames: (n_images_per_batch)
+        print('make. labels_enc = ' + str(labels_enc))
         inputs_reord = simplify_batch_dimensions(inputs)  # (batch_size, input_image_size, input_image_size, 3)
         labels_enc_reord = simplify_batch_dimensions(labels_enc)  # (batch_size, n_labels)
         common_representation = network.common_representation(inputs_reord, self.opts.lcr)  # (batch_size, 1, 1, lcr)
