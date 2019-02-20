@@ -58,9 +58,14 @@ class MultiCellEnv:
                 localizations, softmax, CRs = sess.run([self.localizations, self.softmax, self.common_representations],
                                                        feed_dict={self.inputs: batch_images})
                 # softmax = self.remove_repeated_predictions(softmax, CRs, sess)
+                # Convert output arrays to BoundingBox objects:
                 batch_gt_boxes, batch_pred_boxes = self.postprocess_gt_and_preds(batch_bboxes, localizations, softmax)
+                # Supress repeated predictions with non-maximum suppression:
                 batch_pred_boxes = non_maximum_suppression_batched(batch_pred_boxes, self.opts.threshold_nms)
+                # Supress repeated predictions with comparisons:
                 batch_pred_boxes = self.remove_repeated_predictions_batched(batch_pred_boxes, CRs, sess)
+                # Mark True and False positives:
+                batch_pred_boxes = mark_true_false_positives(batch_pred_boxes, batch_gt_boxes, self.opts.threshold_iou)
                 if self.opts.write_results:
                     write_results(batch_images, batch_pred_boxes, batch_gt_boxes, batch_filenames, self.classnames,
                                   images_dir, self.opts.write_results, step)
@@ -94,7 +99,7 @@ class MultiCellEnv:
         # batch_boxes: List of size batch_size, with lists with all the predicted bounding boxes in an image.
         # batch_CRs: (batch_size, nboxes, lcr)
         initime = time.time()
-        logging.debug('Removing repeated predictions...')
+        # logging.debug('Removing repeated predictions...')
         batch_remaining_boxes = []
         batch_size = len(batch_boxes)
         n_comparisons = 0
@@ -107,11 +112,11 @@ class MultiCellEnv:
             batch_remaining_boxes.append(remaining_boxes)
         fintime = time.time()
         logging.info('Repeated predictions removed in %.2f s (%d comparisons).' % (fintime - initime, n_comparisons))
-        print('Number of images: ' + str(batch_size))
-        print('Initial number of detections: ' + str(n_detections_initially))
-        print('Initial number of detections: ' + str(n_detections_finally))
-        print('In relative terms, we passed from ' + str(n_detections_initially / float(batch_size)) +
-              ' to ' + str(n_detections_finally / float(batch_size)) + ' detections per image.')
+        # print('Number of images: ' + str(batch_size))
+        # print('Initial number of detections: ' + str(n_detections_initially))
+        # print('Initial number of detections: ' + str(n_detections_finally))
+        # print('In relative terms, we passed from ' + str(n_detections_initially / float(batch_size)) +
+        #       ' to ' + str(n_detections_finally / float(batch_size)) + ' detections per image.')
         return batch_remaining_boxes
 
     def remove_repeated_predictions(self, boxes, CRs, sess):
@@ -245,9 +250,6 @@ class MultiCellEnv:
                         img_pred_boxes.append(pred_box)
 
             batch_pred_boxes.append(img_pred_boxes)
-
-        # Mark True and False positives:
-        batch_pred_boxes = mark_true_false_positives(batch_pred_boxes, batch_gt_boxes, self.opts.threshold_iou)
 
         return batch_gt_boxes, batch_pred_boxes
 

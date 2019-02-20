@@ -146,7 +146,7 @@ class SingleCellArch:
         tf.summary.scalar('metrics/accuracy_conf', accuracy_conf)
         total_loss = conf_loss
 
-        loc_loss, iou_mean = localization_loss_and_metric(pred_coords, mask_match, gt_coords, zeros, n_positives,
+        loc_loss, iou_mean = localization_loss_and_metric(pred_coords, mask_match, mask_neutral, gt_coords, zeros,
                                                           self.opts.loc_loss_factor, self.opts)
         tf.summary.scalar('losses/loc_loss', loc_loss)
         tf.summary.scalar('metrics/iou_mean', iou_mean)
@@ -183,10 +183,6 @@ class SingleCellArch:
             mask_thresholds = mask_ar & mask_pc & mask_dc  # (n_gt)
             any_match = np.any(mask_thresholds)  # ()
 
-            dc_masked = np.where(mask_thresholds, dc, np.infty * np.ones(shape=(n_gt), dtype=np.float32) ) # (n_gt)
-
-            nearest_valid_box_idx = np.argmin(dc_masked)  # ()
-
             # Neutral boxes:
             mask_ar_neutral = ar > self.opts.threshold_ar_neutral  # (n_gt)
             mask_pc_neutral = pc > self.opts.threshold_pc_neutral  # (n_gt)
@@ -194,6 +190,13 @@ class SingleCellArch:
             mask_thresholds_neutral = mask_ar_neutral & mask_pc_neutral & mask_dc_neutral  # (n_gt)
             any_neutral = np.any(mask_thresholds_neutral, axis=0)  # ()
             is_neutral = np.logical_and(any_neutral, np.logical_not(any_match))  # ()
+
+            if any_match:
+                dc_masked = np.where(mask_thresholds, dc, np.infty * np.ones(shape=(n_gt), dtype=np.float32) ) # (n_gt)
+            else:
+                dc_masked = np.where(mask_thresholds_neutral, dc, np.infty * np.ones(shape=(n_gt), dtype=np.float32) ) # (n_gt)
+
+            nearest_valid_box_idx = np.argmin(dc_masked)  # ()
 
             # Get the coordinates and the class id of the gt box matched:
             coordinates = gt_coords[nearest_valid_box_idx, :]  # (4)
@@ -221,7 +224,7 @@ class SingleCellArch:
                                    float(class_id),
                                    associated_gt_idx,
                                    pc_associated])
-            labels_enc = np.concatenate([coordinates_enc, labels_enc])  # (9)
+            labels_enc = np.concatenate([coordinates_enc, labels_enc])  # (size_labels_enc)
 
         else:
             labels_enc = np.zeros(shape=(9), dtype=np.float32)
@@ -582,27 +585,29 @@ def classification_loss_and_metric(pred_conf, mask_match, mask_neutral, gt_class
     return loss_conf, accuracy_conf
 
 
-def localization_loss_and_metric(pred_coords, mask_match, gt_coords, zeros, n_positives, loc_loss_factor, opts):
+def localization_loss_and_metric(pred_coords, mask_match, mask_neutral, gt_coords, zeros, loc_loss_factor, opts):
     # pred_coords: (batch_size, 4)  encoded
     # mask_match: (batch_size)
+    # mask_neutral: (batch_size)
     # gt_coords: (batch_size, 4)  encoded
     # zeros: (batch_size)
-    # n_positives: ()
     with tf.variable_scope('loc_loss'):
-        n_positives_safe = tf.maximum(tf.cast(n_positives, tf.float32), 1)
         localization_loss = CommonEncoding.smooth_L1_loss(gt_coords, pred_coords)  # (batch_size)
-        localization_loss_matches = tf.where(mask_match, localization_loss, zeros, name='loss_match')  # (batch_size)
+        valids_for_loc = tf.logical_or(mask_match, mask_neutral)  # (batch_size)
+        n_valids = tf.reduce_sum(tf.cast(valids_for_loc, tf.int32), name='n_valids_loc')  # ()
+        n_valids_safe = tf.maximum(tf.cast(n_valids, tf.float32), 1)
+        localization_loss_matches = tf.where(valids_for_loc, localization_loss, zeros, name='loss_match')  # (batch_size)
         loss_loc_summed = tf.reduce_sum(localization_loss_matches, name='loss_summed')  # ()
-        loss_loc_scaled = tf.divide(loss_loc_summed, n_positives_safe, name='loss_scaled')  # ()
+        loss_loc_scaled = tf.divide(loss_loc_summed, n_valids_safe, name='loss_scaled')  # ()
         loss_loc = tf.multiply(loss_loc_scaled, loc_loss_factor, name='loss_loc')  # ()
 
         # Metric:
         pred_coords_dec = decode_boxes_tf(pred_coords, opts)  # (batch_size, 4)
         gt_coords_dec = decode_boxes_tf(gt_coords, opts)  # (batch_size, 4)
         iou = compute_iou_tf(pred_coords_dec, gt_coords_dec)  # (batch_size)
-        iou_matches = tf.where(mask_match, iou, zeros)  # (batch_size)
+        iou_matches = tf.where(valids_for_loc, iou, zeros)  # (batch_size)
         iou_summed = tf.reduce_sum(iou_matches)  # ()
-        iou_mean = tf.divide(iou_summed, n_positives_safe, name='iou_mean')  # ()
+        iou_mean = tf.divide(iou_summed, n_valids_safe, name='iou_mean')  # ()
     return loss_loc, iou_mean
 
 

@@ -95,7 +95,7 @@ class MultiCellArch:
                     anchors_to_compare.append(j)
             n_comp_this_anchor = len(anchors_to_compare)
             total_number_of_comparisons += n_comp_this_anchor
-            print('Anchor ' + str(i) + ': ' + str(n_comp_this_anchor) + ' comparisons.')
+            # print('Anchor ' + str(i) + ': ' + str(n_comp_this_anchor) + ' comparisons.')
             self.comparisons_references.append(anchors_to_compare)
         mean_comparisons = total_number_of_comparisons / float(self.n_boxes)
         print('Mean number of comparisons per anchor: ' + str(mean_comparisons))
