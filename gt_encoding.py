@@ -21,12 +21,12 @@ def get_associated_gt_idx(labels_enc):
     return labels_enc[..., 7]
 
 
-def get_pc(labels_enc):
+def get_pc_enc(labels_enc):
     # labels_enc_reord: (..., n_labels)
     return labels_enc[..., 8]
 
 
-def get_dc(labels_enc):
+def get_dc_enc(labels_enc):
     # labels_enc_reord: (..., n_labels)
     return labels_enc[..., 9]
 

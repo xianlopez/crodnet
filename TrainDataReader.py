@@ -27,8 +27,6 @@ class TrainDataReader(CommonDataReader):
         self.train_init_op = None
         self.val_init_op = None
 
-        print('class names in TrainDataReader')
-        print(self.classnames)
         self.outdir = opts.outdir
 
         self.image_cropper = ImageCropper.ImageCropper(opts.image_cropper_opts, self.single_cell_arch, opts.single_cell_opts.n_crops_per_image)

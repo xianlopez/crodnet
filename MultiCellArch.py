@@ -162,8 +162,8 @@ class MultiCellArch:
             print('Number of boxes in each dimension: ' + str(grid.output_shape))
             print('Number of boxes: ' + str(grid.n_boxes))
             print('Start position in flat representation: ' + str(grid.flat_start_pos))
-            min_object_area = int(np.round(self.input_image_size_w_pad * np.sqrt(self.opts.threshold_ar) * grid.rel_box_size))
-            print('Minimum object size that this grid can detect: ' + str(min_object_area) + 'x' + str(min_object_area))
+            # min_object_area = int(np.round(self.input_image_size_w_pad * np.sqrt(self.opts.threshold_ar_low) * grid.rel_box_size))
+            # print('Minimum object size that this grid can detect: ' + str(min_object_area) + 'x' + str(min_object_area))
             if i < len(self.grid_levels) - 1:
                 print('Area ratio with next grid level: ' +
                       str(float(self.grid_levels[i + 1].rel_box_size * self.grid_levels[i + 1].rel_box_size) /

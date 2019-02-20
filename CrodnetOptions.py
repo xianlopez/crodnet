@@ -2,13 +2,6 @@ class CommonOptions:
     def __init__(self):
         self.n_images_per_batch = 16
 
-        self.threshold_ar = 0.05
-        self.threshold_pc = 0.99
-        self.threshold_dc = 0.5
-        self.threshold_ar_neutral = 0.025
-        self.threshold_pc_neutral = 0.1
-        self.threshold_dc_neutral = 0.75
-
         self.predict_pc = False
         self.predict_dc = False
 
@@ -38,6 +31,16 @@ class SingleCellOptions(CommonOptions):
         self.n_crops_per_image = 8
         self.n_comparisons_intra = 8
         self.n_comparisons_inter = 1
+
+        self.threshold_ar_low = 0.05
+        self.threshold_ar_high = 0.9
+        self.threshold_pc = 0.99
+        self.threshold_dc = 0.5
+
+        self.threshold_ar_low_neutral = 0.04
+        self.threshold_ar_high_neutral = 0.9
+        self.threshold_pc_neutral = 0.8
+        self.threshold_dc_neutral = 0.7
 
         self.loc_loss_factor = 1
         self.comp_loss_factor = 1

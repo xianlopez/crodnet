@@ -141,6 +141,14 @@ def smooth_L1_loss(y_true, y_pred, reduce_last_dim=True):
         return l1_loss
 
 
+def decode_pc_tf(pc_enc):
+    return decode_pc_or_dc_tf(pc_enc)
+
+
+def decode_dc_tf(dc_enc):
+    return decode_pc_or_dc_tf(dc_enc)
+
+
 def decode_pc_np(pc_enc):
     return decode_pc_or_dc_np(pc_enc)
 
@@ -149,15 +157,21 @@ def decode_dc_np(dc_enc):
     return decode_pc_or_dc_np(dc_enc)
 
 
+def decode_pc_or_dc_tf(x_enc):
+    # x_enc: any shape
+    x_dec = tf.clip_by_value(x_enc * 0.1, 0.0, 1.0)
+    return x_dec
+
+
 def decode_pc_or_dc_np(x_enc):
     # x_enc: any shape
-    x_dec = np.clip(np.exp(x_enc * 0.2), 0.0, 1.0)
+    x_dec = np.clip(x_enc * 0.1, 0.0, 1.0)
     return x_dec
 
 
 def encode_pc_or_dc_np(x_dec):
     # x_dec: any shape
-    x_enc = np.log(x_dec) * 5.0
+    x_enc = x_dec * 10
     return x_enc
 
 

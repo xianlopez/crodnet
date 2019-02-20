@@ -18,6 +18,10 @@ class SingleCellArch:
         self.n_labels = 10
         self.batch_size = self.opts.n_images_per_batch * self.opts.n_crops_per_image
         self.metric_names = ['accuracy_conf', 'iou_mean', 'accuracy_comp']
+        if self.opts.predict_pc:
+            self.metric_names.append('pc_mean_err')
+        if self.opts.predict_dc:
+            self.metric_names.append('dc_mean_err')
         self.n_metrics = len(self.metric_names)
         self.outdir = outdir
         self.classnames = None
@@ -37,14 +41,11 @@ class SingleCellArch:
         for name in classnames:
             self.classnames.append(name)
         self.classnames.append('background')
-        print('classnames')
-        print(self.classnames)
 
     def make(self, inputs, labels_enc, filenames):
         # inputs: (n_images_per_batch, n_crops_per_image, input_image_size, input_image_size, 3)
         # labels_enc: (n_images_per_batch, n_crops_per_image, n_labels)
         # filenames: (n_images_per_batch)
-        print('make. labels_enc = ' + str(labels_enc))
         inputs_reord = simplify_batch_dimensions(inputs)  # (batch_size, input_image_size, input_image_size, 3)
         labels_enc_reord = simplify_batch_dimensions(labels_enc)  # (batch_size, n_labels)
         common_representation = network.common_representation(inputs_reord, self.opts.lcr)  # (batch_size, 1, 1, lcr)
@@ -135,15 +136,15 @@ class SingleCellArch:
         # Split net output:
         locs_enc = output_encoding.get_loc_enc(net_output)  # (batch_size, 4)
         logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nclasses)
-        pc_pred = output_encoding.get_pc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
-        dc_pred = output_encoding.get_dc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
+        pc_pred = output_encoding.get_pc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
+        dc_pred = output_encoding.get_dc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
 
         mask_match = gt_encoding.get_mask_match(labels_enc_reord)  # (batch_size)
         mask_neutral = gt_encoding.get_mask_neutral(labels_enc_reord)  # (batch_size)
         gt_class_ids = gt_encoding.get_class_id(labels_enc_reord)  # (batch_size)
         gt_coords = gt_encoding.get_coords_enc(labels_enc_reord)  # (batch_size)
-        pc_label = gt_encoding.get_pc(labels_enc_reord)  # (batch_size)
-        dc_label = gt_encoding.get_dc(labels_enc_reord)  # (batch_size)
+        pc_label = gt_encoding.get_pc_enc(labels_enc_reord)  # (batch_size)
+        dc_label = gt_encoding.get_dc_enc(labels_enc_reord)  # (batch_size)
 
         mask_match = tf.greater(mask_match, 0.5)
         mask_neutral = tf.greater(mask_neutral, 0.5)
@@ -168,19 +169,24 @@ class SingleCellArch:
         tf.summary.scalar('metrics/accuracy_comp', accuracy_comp)
         total_loss += comp_loss
 
+        metrics = tf.stack([accuracy_conf, iou_mean, accuracy_comp])  # (3)
+
         if self.opts.predict_pc:
             pc_loss, pc_metric = pc_loss_and_metric(pc_pred, pc_label, mask_match, mask_neutral, zeros, self.opts.pc_loss_factor)
             tf.summary.scalar('losses/pc_loss', pc_loss)
             tf.summary.scalar('metrics/pc_metric', pc_metric)
             total_loss += pc_loss
+            metrics = tf.concat([metrics, tf.expand_dims(pc_metric, axis=0)], axis=0)
 
         if self.opts.predict_dc:
             dc_loss, dc_metric = dc_loss_and_metric(dc_pred, dc_label, mask_match, mask_neutral, zeros, self.opts.dc_loss_factor)
             tf.summary.scalar('losses/dc_loss', dc_loss)
             tf.summary.scalar('metrics/dc_metric', dc_metric)
             total_loss += dc_loss
+            metrics = tf.concat([metrics, tf.expand_dims(dc_metric, axis=0)], axis=0)
 
-        metrics = tf.stack([accuracy_conf, iou_mean, accuracy_comp])  # (n_metrics)
+        # total_loss: ()
+        # metrics: (n_metrics)
 
         return total_loss, metrics
 
@@ -200,17 +206,19 @@ class SingleCellArch:
             pc = gt_pc_incoming  # (n_gt)
 
             # Positive boxes:
-            mask_ar = ar > self.opts.threshold_ar  # (n_gt)
+            mask_ar_low = ar > self.opts.threshold_ar_low  # (n_gt)
+            mask_ar_high = ar < self.opts.threshold_ar_high  # (n_gt)
             mask_pc = pc > self.opts.threshold_pc  # (n_gt)
             mask_dc = dc < self.opts.threshold_dc  # (n_gt)
-            mask_thresholds = mask_ar & mask_pc & mask_dc  # (n_gt)
+            mask_thresholds = mask_ar_low & mask_ar_high & mask_pc & mask_dc  # (n_gt)
             any_match = np.any(mask_thresholds)  # ()
 
             # Neutral boxes:
-            mask_ar_neutral = ar > self.opts.threshold_ar_neutral  # (n_gt)
+            mask_ar_low_neutral = ar > self.opts.threshold_ar_low_neutral  # (n_gt)
+            mask_ar_high_neutral = ar < self.opts.threshold_ar_high_neutral  # (n_gt)
             mask_pc_neutral = pc > self.opts.threshold_pc_neutral  # (n_gt)
             mask_dc_neutral = dc < self.opts.threshold_dc_neutral  # (n_gt)
-            mask_thresholds_neutral = mask_ar_neutral & mask_pc_neutral & mask_dc_neutral  # (n_gt)
+            mask_thresholds_neutral = mask_ar_low_neutral & mask_ar_high_neutral & mask_pc_neutral & mask_dc_neutral  # (n_gt)
             any_neutral = np.any(mask_thresholds_neutral, axis=0)  # ()
             is_neutral = np.logical_and(any_neutral, np.logical_not(any_match))  # ()
             is_negative = np.logical_not(np.logical_or(any_match, any_neutral))
@@ -241,13 +249,16 @@ class SingleCellArch:
                 # Take the original GT index:
                 associated_gt_idx = gt_boxes[nearest_valid_box_idx, 6]  # ()
 
+            pc_enc = CommonEncoding.encode_pc_or_dc_np(pc_associated)
+            dc_enc = CommonEncoding.encode_pc_or_dc_np(dc_associated)
+
             # Put all together in one array:
             labels_enc = np.stack([any_match.astype(np.float32),
                                    is_neutral.astype(np.float32),
                                    class_id,
                                    associated_gt_idx,
-                                   pc_associated,
-                                   dc_associated])
+                                   pc_enc,
+                                   dc_enc])
             labels_enc = np.concatenate([coordinates_enc, labels_enc])  # (n_labels)
 
         else:
@@ -268,8 +279,8 @@ class SingleCellArch:
         # Split net output:
         locs_enc = output_encoding.get_loc_enc(net_output)  # (batch_size, 4)
         logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nclasses)
-        pc = output_encoding.get_pc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
-        dc = output_encoding.get_dc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
+        pc_enc = output_encoding.get_pc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
+        dc_enc = output_encoding.get_dc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
 
         if self.classnames is None:
             raise Exception('classnames must be specified if debugging.')
@@ -433,8 +444,8 @@ class SingleCellArch:
         # Split net output:
         locs_enc = output_encoding.get_loc_enc(net_output)  # (batch_size, 4)
         logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nclasses)
-        pc = output_encoding.get_pc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
-        dc = output_encoding.get_dc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
+        pc_enc = output_encoding.get_pc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
+        dc_enc = output_encoding.get_dc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
 
         if self.classnames is None:
             raise Exception('classnames must be specified if debugging.')
@@ -683,7 +694,7 @@ def pc_loss_and_metric(pc_pred, pc_label, mask_match, mask_neutral, zeros, pc_lo
     # zeros: (batch_size)
     with tf.variable_scope('pc_loss'):
         # Loss:
-        pc_loss_orig = CommonEncoding.smooth_L1_loss(pc_label, pc_pred)  # (batch_size)
+        pc_loss_orig = CommonEncoding.smooth_L1_loss(pc_label, pc_pred, reduce_last_dim=False)  # (batch_size)
         valids_for_pc = tf.logical_or(mask_match, mask_neutral)  # (batch_size)
         n_valids = tf.reduce_sum(tf.cast(valids_for_pc, tf.int32), name='n_valids')  # ()
         n_valids_safe = tf.maximum(tf.cast(n_valids, tf.float32), 1)
@@ -693,8 +704,8 @@ def pc_loss_and_metric(pc_pred, pc_label, mask_match, mask_neutral, zeros, pc_lo
         loss_pc = tf.multiply(pc_loc_scaled, pc_loss_factor, name='loss_pc')  # ()
 
         # Metric:
-        pc_pred_dec = CommonEncoding.decode_pc_np(pc_pred)  # (batch_size)
-        pc_label_dec = CommonEncoding.decode_pc_np(pc_label)  # (batch_size)
+        pc_pred_dec = CommonEncoding.decode_pc_tf(pc_pred)  # (batch_size)
+        pc_label_dec = CommonEncoding.decode_pc_tf(pc_label)  # (batch_size)
         abs_difference = tf.abs(pc_pred_dec - pc_label_dec)  # (batch_size)
         diff_masked = tf.where(valids_for_pc, abs_difference, zeros)  # (batch_size)
         diff_sum = tf.reduce_sum(diff_masked)  # ()
@@ -710,7 +721,7 @@ def dc_loss_and_metric(dc_pred, dc_label, mask_match, mask_neutral, zeros, dc_lo
     # zeros: (batch_size)
     with tf.variable_scope('dc_loss'):
         # Loss:
-        dc_loss_orig = CommonEncoding.smooth_L1_loss(dc_label, dc_pred)  # (batch_size)
+        dc_loss_orig = CommonEncoding.smooth_L1_loss(dc_label, dc_pred, reduce_last_dim=False)  # (batch_size)
         valids_for_dc = tf.logical_or(mask_match, mask_neutral)  # (batch_size)
         n_valids = tf.reduce_sum(tf.cast(valids_for_dc, tf.int32), name='n_valids')  # ()
         n_valids_safe = tf.maximum(tf.cast(n_valids, tf.float32), 1)
@@ -720,8 +731,8 @@ def dc_loss_and_metric(dc_pred, dc_label, mask_match, mask_neutral, zeros, dc_lo
         loss_dc = tf.multiply(dc_loc_scaled, dc_loss_factor, name='loss_dc')  # ()
 
         # Metric:
-        dc_pred_dec = CommonEncoding.decode_dc_np(dc_pred)  # (batch_size)
-        dc_label_dec = CommonEncoding.decode_dc_np(dc_label)  # (batch_size)
+        dc_pred_dec = CommonEncoding.decode_dc_tf(dc_pred)  # (batch_size)
+        dc_label_dec = CommonEncoding.decode_dc_tf(dc_label)  # (batch_size)
         abs_difference = tf.abs(dc_pred_dec - dc_label_dec)  # (batch_size)
         diff_masked = tf.where(valids_for_dc, abs_difference, zeros)  # (batch_size)
         diff_sum = tf.reduce_sum(diff_masked)  # ()

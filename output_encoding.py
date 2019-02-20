@@ -19,7 +19,7 @@ def get_logits(net_output, predict_pc, predict_dc):
         return net_output[..., 4:]
 
 
-def get_pc(net_output, predict_pc, predict_dc):
+def get_pc_enc(net_output, predict_pc, predict_dc):
     # net_output: (..., ?)
     if not predict_pc:
         return None
@@ -30,7 +30,7 @@ def get_pc(net_output, predict_pc, predict_dc):
             return net_output[..., -1]
 
 
-def get_dc(net_output, predict_pc, predict_dc):
+def get_dc_enc(net_output, predict_pc, predict_dc):
     # net_output: (..., ?)
     if not predict_dc:
         return None
