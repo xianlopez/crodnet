@@ -41,6 +41,8 @@ class SingleCellOptions(CommonOptions):
 
         self.loc_loss_factor = 1
         self.comp_loss_factor = 1
+        self.pc_loss_factor = 0.2
+        self.dc_loss_factor = 0.2
 
         self.debug_train = False
         self.debug_eval = False

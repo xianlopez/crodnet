@@ -4,9 +4,10 @@ import network
 import numpy as np
 import CommonEncoding
 import tools
-from BoundingBoxes import BoundingBox, PredictedBox
 import cv2
 import sys
+import gt_encoding
+import output_encoding
 
 
 class SingleCellArch:
@@ -14,7 +15,7 @@ class SingleCellArch:
         self.opts = options
         self.nclasses = nclasses + 1 # The last class id is for the background
         self.background_id = self.nclasses - 1
-        self.n_labels = 9
+        self.n_labels = 10
         self.batch_size = self.opts.n_images_per_batch * self.opts.n_crops_per_image
         self.metric_names = ['accuracy_conf', 'iou_mean', 'accuracy_comp']
         self.n_metrics = len(self.metric_names)
@@ -46,28 +47,32 @@ class SingleCellArch:
         inputs_reord = simplify_batch_dimensions(inputs)  # (batch_size, input_image_size, input_image_size, 3)
         labels_enc_reord = simplify_batch_dimensions(labels_enc)  # (batch_size, n_labels)
         common_representation = network.common_representation(inputs_reord, self.opts.lcr)  # (batch_size, 1, 1, lcr)
-        loc_and_classif = network.localization_and_classification_path(common_representation, self.opts, self.nclasses)  # (batch_size, 1, 1, 4+nclasses)
+        net_output = network.prediction_path(common_representation, self.opts, self.nclasses,
+                                             predict_pc=self.opts.predict_pc, predict_dc=self.opts.predict_dc)  # (batch_size, 1, 1, ?)
         common_representation = tf.squeeze(common_representation, axis=[1, 2])  # (batch_size, lcr)
-        loc_and_classif = tf.squeeze(loc_and_classif, axis=[1, 2])  # (batch_size, 4+nclasses)
+        net_output = tf.squeeze(net_output, axis=[1, 2])  # (batch_size, ?)
+        # Make comparisons:
         comparisons_pred, comps_validity_labels, comparisons_indices = self.make_comparisons(common_representation, labels_enc_reord)
         # comparisons_pred, indices_all_comparisons: (total_comparisons, 2)
         # comparisons_labels: (total_comparisons)
-        loss, metrics = self.make_loss_and_metrics(loc_and_classif, labels_enc_reord, comparisons_pred, comps_validity_labels)  # ()
+        # Make loss and metrics:
+        loss, metrics = self.make_loss_and_metrics(net_output, labels_enc_reord, comparisons_pred, comps_validity_labels)  # ()
+        # Write debug info:
         if self.opts.debug_train:
-            metrics = tf.py_func(self.write_train_debug_info, [metrics, inputs_reord, labels_enc_reord, loc_and_classif,
+            metrics = tf.py_func(self.write_train_debug_info, [metrics, inputs_reord, labels_enc_reord, net_output,
                                                          comparisons_pred, comps_validity_labels, comparisons_indices, filenames], (tf.float32))
         if self.opts.debug_eval:
-            metrics = tf.py_func(self.write_eval_debug_info, [metrics, inputs_reord, labels_enc_reord, loc_and_classif,
+            metrics = tf.py_func(self.write_eval_debug_info, [metrics, inputs_reord, labels_enc_reord, net_output,
                                                          comparisons_pred, comps_validity_labels, comparisons_indices, filenames], (tf.float32))
 
-        return loc_and_classif, loss, metrics
+        return net_output, loss, metrics
 
     def make_comparisons(self, common_representation, labels_enc_reord):
         # common_representation: (batch_size, lcr)
         # labels_enc_reord: (batch_size, n_labels)
-        gt_class_id = CommonEncoding.get_gt_class(labels_enc_reord)  # (batch_size)
-        nearest_valid_gt_idx = CommonEncoding.get_nearest_valid_gt_idx(labels_enc_reord)  # (batch_size)
-        mask_neutral = CommonEncoding.get_mask_neutral(labels_enc_reord)  # (batch_size)
+        gt_class_id = gt_encoding.get_class_id(labels_enc_reord)  # (batch_size)
+        nearest_valid_gt_idx = gt_encoding.get_associated_gt_idx(labels_enc_reord)  # (batch_size)
+        mask_neutral = gt_encoding.get_mask_neutral(labels_enc_reord)  # (batch_size)
         images_range = tf.range(self.opts.n_images_per_batch)  # (n_images_per_batch)
 
         # Indices of intra comprarisons:
@@ -119,20 +124,25 @@ class SingleCellArch:
 
         return comparisons_pred, validity_labels_comps, indices_all_comparisons
 
-    def make_loss_and_metrics(self, loc_and_classif, labels_enc_reord, comparisons_pred, comps_validity_labels):
+    def make_loss_and_metrics(self, net_output, labels_enc_reord, comparisons_pred, comps_validity_labels):
         # common_representation: (batch_size, lcr)
-        # loc_and_classif: (batch_size, 4+nclasses)
+        # net_output: (batch_size, ?)
         # labels_enc_reord: (batch_size, n_labels)
         # comparisons_pred: (total_comparisons, 2)
         # comps_validity_labels: (total_comparisons, 2)  [validity, label]
 
-        pred_conf = loc_and_classif[:, 4:]  # (batch_size, nclasses)
-        pred_coords = loc_and_classif[:, :4]  # (batch_size, 4)
+        # Split net output:
+        locs_enc = output_encoding.get_loc_enc(net_output)  # (batch_size, 4)
+        logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nclasses)
+        pc_pred = output_encoding.get_pc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
+        dc_pred = output_encoding.get_dc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
 
-        mask_match = CommonEncoding.get_mask_match(labels_enc_reord)  # (batch_size)
-        mask_neutral = CommonEncoding.get_mask_neutral(labels_enc_reord)  # (batch_size)
-        gt_class_ids = CommonEncoding.get_gt_class(labels_enc_reord)  # (batch_size)
-        gt_coords = CommonEncoding.get_gt_coords(labels_enc_reord)  # (batch_size)
+        mask_match = gt_encoding.get_mask_match(labels_enc_reord)  # (batch_size)
+        mask_neutral = gt_encoding.get_mask_neutral(labels_enc_reord)  # (batch_size)
+        gt_class_ids = gt_encoding.get_class_id(labels_enc_reord)  # (batch_size)
+        gt_coords = gt_encoding.get_coords_enc(labels_enc_reord)  # (batch_size)
+        pc_label = gt_encoding.get_pc(labels_enc_reord)  # (batch_size)
+        dc_label = gt_encoding.get_dc(labels_enc_reord)  # (batch_size)
 
         mask_match = tf.greater(mask_match, 0.5)
         mask_neutral = tf.greater(mask_neutral, 0.5)
@@ -140,13 +150,13 @@ class SingleCellArch:
         zeros = tf.zeros_like(mask_match, dtype=tf.float32)  # (batch_size)
         n_positives = tf.reduce_sum(tf.cast(mask_match, tf.int32), name='n_positives')  # ()
 
-        conf_loss, accuracy_conf = classification_loss_and_metric(pred_conf, mask_match, mask_neutral,
+        conf_loss, accuracy_conf = classification_loss_and_metric(logits, mask_match, mask_neutral,
                                                                   gt_class_ids, zeros, n_positives)
         tf.summary.scalar('losses/conf_loss', conf_loss)
         tf.summary.scalar('metrics/accuracy_conf', accuracy_conf)
         total_loss = conf_loss
 
-        loc_loss, iou_mean = localization_loss_and_metric(pred_coords, mask_match, mask_neutral, gt_coords, zeros,
+        loc_loss, iou_mean = localization_loss_and_metric(locs_enc, mask_match, mask_neutral, gt_coords, zeros,
                                                           self.opts.loc_loss_factor, self.opts)
         tf.summary.scalar('losses/loc_loss', loc_loss)
         tf.summary.scalar('metrics/iou_mean', iou_mean)
@@ -156,6 +166,18 @@ class SingleCellArch:
         tf.summary.scalar('losses/comp_loss', comp_loss)
         tf.summary.scalar('metrics/accuracy_comp', accuracy_comp)
         total_loss += comp_loss
+
+        if self.opts.predict_pc:
+            pc_loss, pc_metric = pc_loss_and_metric(pc_pred, pc_label, mask_match, mask_neutral, zeros, self.opts.pc_loss_factor)
+            tf.summary.scalar('losses/pc_loss', pc_loss)
+            tf.summary.scalar('metrics/pc_metric', pc_metric)
+            total_loss += pc_loss
+
+        if self.opts.predict_dc:
+            dc_loss, dc_metric = dc_loss_and_metric(dc_pred, dc_label, mask_match, mask_neutral, zeros, self.opts.dc_loss_factor)
+            tf.summary.scalar('losses/dc_loss', dc_loss)
+            tf.summary.scalar('metrics/dc_metric', dc_metric)
+            total_loss += dc_loss
 
         metrics = tf.stack([accuracy_conf, iou_mean, accuracy_comp])  # (n_metrics)
 
@@ -190,6 +212,7 @@ class SingleCellArch:
             mask_thresholds_neutral = mask_ar_neutral & mask_pc_neutral & mask_dc_neutral  # (n_gt)
             any_neutral = np.any(mask_thresholds_neutral, axis=0)  # ()
             is_neutral = np.logical_and(any_neutral, np.logical_not(any_match))  # ()
+            is_negative = np.logical_not(np.logical_or(any_match, any_neutral))
 
             if any_match:
                 dc_masked = np.where(mask_thresholds, dc, np.infty * np.ones(shape=(n_gt), dtype=np.float32) ) # (n_gt)
@@ -199,47 +222,54 @@ class SingleCellArch:
             nearest_valid_box_idx = np.argmin(dc_masked)  # ()
 
             # Get the coordinates and the class id of the gt box matched:
-            coordinates = gt_coords[nearest_valid_box_idx, :]  # (4)
-            coordinates_enc = encode_boxes_np(coordinates, self.opts)  # (4)
-            class_id = gt_class_ids[nearest_valid_box_idx]
-
-            # Negative boxes:
-            is_negative = np.logical_and(np.logical_not(any_match), np.logical_not(is_neutral))  # ()
             if is_negative:
-                class_id = self.background_id
-
-            # Percent contained associated with each anchor box.
-            # This is the PC of the assigned gt box, if there is any, or otherwise the maximum PC it has.
-            if any_match:
-                pc_associated = pc[nearest_valid_box_idx]
+                coordinates_enc = np.zeros(shape=(4), dtype=np.float32)
+                class_id = float(self.background_id)
+                pc_associated = 0.0
+                dc_associated = 1.0
+                associated_gt_idx = -1.0
             else:
-                pc_associated = np.max(pc)
-
-            # Take the original GT index:
-            associated_gt_idx = gt_boxes[nearest_valid_box_idx, 6]  # ()
+                coordinates = gt_coords[nearest_valid_box_idx, :]  # (4)
+                coordinates_enc = CommonEncoding.encode_boxes_wrt_anchor_np(coordinates, self.opts)  # (4)
+                # Class id:
+                class_id = gt_class_ids[nearest_valid_box_idx]
+                # Percent contained:
+                pc_associated = pc[nearest_valid_box_idx]
+                # Distance to center:
+                dc_associated = dc[nearest_valid_box_idx]
+                # Take the original GT index:
+                associated_gt_idx = gt_boxes[nearest_valid_box_idx, 6]  # ()
 
             # Put all together in one array:
             labels_enc = np.stack([any_match.astype(np.float32),
                                    is_neutral.astype(np.float32),
-                                   float(class_id),
+                                   class_id,
                                    associated_gt_idx,
-                                   pc_associated])
-            labels_enc = np.concatenate([coordinates_enc, labels_enc])  # (size_labels_enc)
+                                   pc_associated,
+                                   dc_associated])
+            labels_enc = np.concatenate([coordinates_enc, labels_enc])  # (n_labels)
 
         else:
-            labels_enc = np.zeros(shape=(9), dtype=np.float32)
+            labels_enc = np.zeros(shape=(self.n_labels), dtype=np.float32)
             labels_enc[6] = self.background_id
 
-        return labels_enc  # (9)
+        return labels_enc  # (n_labels)
 
-    def write_train_debug_info(self, metrics, inputs_reord, labels_enc_reord, loc_and_classif, comparisons_pred, comps_validity_labels, comparisons_indices, filenames):
+    def write_train_debug_info(self, metrics, inputs_reord, labels_enc_reord, net_output, comparisons_pred, comps_validity_labels, comparisons_indices, filenames):
         # inputs_reord: (batch_size, input_image_size, input_image_size, 3)
         # labels_enc_reord: (batch_size, n_labels)
-        # loc_and_classif: (batch_size, 4+nclasses)
+        # net_output: (batch_size, ?)
         # comparisons_pred: (total_comparisons, 2)
         # comps_validity_labels: (total_comparisons, 2)  [validity, label]
         # comparisons_indices: (total_comparisons, 2)
         # filenames: (n_images_per_batch)
+
+        # Split net output:
+        locs_enc = output_encoding.get_loc_enc(net_output)  # (batch_size, 4)
+        logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nclasses)
+        pc = output_encoding.get_pc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
+        dc = output_encoding.get_dc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
+
         if self.classnames is None:
             raise Exception('classnames must be specified if debugging.')
         self.batch_count_train_debug += 1
@@ -248,20 +278,20 @@ class SingleCellArch:
         batch_size = self.opts.n_crops_per_image * self.opts.n_images_per_batch
         filenames_ext = np.tile(np.expand_dims(filenames, axis=-1), [1, self.opts.n_crops_per_image])  # (n_images_per_batch, n_crops_per_image)
         filenames_reord = np.reshape(filenames_ext, newshape=(batch_size))  # (batch_size)
-        mask_match = CommonEncoding.get_mask_match(labels_enc_reord) > 0.5  # (batch_size)
-        mask_neutral = CommonEncoding.get_mask_neutral(labels_enc_reord) > 0.5  # (batch_size)
+        mask_match = gt_encoding.get_mask_match(labels_enc_reord) > 0.5  # (batch_size)
+        mask_neutral = gt_encoding.get_mask_neutral(labels_enc_reord) > 0.5  # (batch_size)
         for i in range(batch_size):
             name = filenames_reord[i].decode(sys.getdefaultencoding())
             try:
                 crop = inputs_reord[i, ...]  # (input_image_size, input_image_size, 3)
                 crop = tools.add_mean_again(crop)
                 label_enc = labels_enc_reord[i, :]
-                gt_class = int(CommonEncoding.get_gt_class(label_enc))
-                gt_coords_enc = CommonEncoding.get_gt_coords(label_enc)
-                gt_coords_dec = CommonEncoding.decode_boxes_np(gt_coords_enc, self.opts)
+                gt_class = int(gt_encoding.get_class_id(label_enc))
+                gt_coords_enc = gt_encoding.get_coords_enc(label_enc)
+                gt_coords_dec = CommonEncoding.decode_boxes_wrt_anchor_np(gt_coords_enc, self.opts)
                 is_match = mask_match[i]
                 is_neutral = mask_neutral[i]
-                predicted_class = np.argmax(loc_and_classif[i, 4:])
+                predicted_class = np.argmax(logits[i, :])
                 if is_neutral:
                     crop_path = os.path.join(batch_dir, name + '_crop' + str(i) + '_NEUTRAL_PRED-' + self.classnames[predicted_class] + '.png')
                 else:
@@ -273,8 +303,8 @@ class SingleCellArch:
                         crop = tools.add_bounding_boxes_to_image(crop, class_and_coords, color=(255, 0, 0))
                     else:
                         assert not is_match, 'is_match is True, and gt_class it background_id.'
-                    predicted_coords_enc = loc_and_classif[i, :4]
-                    predicted_coords_dec = CommonEncoding.decode_boxes_np(predicted_coords_enc, self.opts)
+                    predicted_coords_enc = locs_enc[i, :]
+                    predicted_coords_dec = CommonEncoding.decode_boxes_wrt_anchor_np(predicted_coords_enc, self.opts)
                     if predicted_class != self.background_id:
                         class_and_coords = np.concatenate([np.expand_dims(predicted_class, axis=0), predicted_coords_dec], axis=0)  # (5)
                         class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
@@ -307,18 +337,18 @@ class SingleCellArch:
                 crop2 = tools.add_mean_again(crop2)
                 # Box of crop 1:
                 label_enc_1 = labels_enc_reord[idx1, :]
-                gt_class_1 = int(CommonEncoding.get_gt_class(label_enc_1))
-                gt_coords_enc_1 = CommonEncoding.get_gt_coords(label_enc_1)
-                gt_coords_dec_1 = CommonEncoding.decode_boxes_np(gt_coords_enc_1, self.opts)
+                gt_class_1 = int(gt_encoding.get_class_id(label_enc_1))
+                gt_coords_enc_1 = gt_encoding.get_coords_enc(label_enc_1)
+                gt_coords_dec_1 = CommonEncoding.decode_boxes_wrt_anchor_np(gt_coords_enc_1, self.opts)
                 if gt_class_1 != self.background_id:
                     class_and_coords = np.concatenate([np.expand_dims(gt_class_1, axis=0), gt_coords_dec_1], axis=0)  # (5)
                     class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
                     crop1 = tools.add_bounding_boxes_to_image(crop1, class_and_coords, color=(255, 0, 0))
                 # Box of crop 2:
                 label_enc_2 = labels_enc_reord[idx2, :]
-                gt_class_2 = int(CommonEncoding.get_gt_class(label_enc_2))
-                gt_coords_enc_2 = CommonEncoding.get_gt_coords(label_enc_2)
-                gt_coords_dec_2 = CommonEncoding.decode_boxes_np(gt_coords_enc_2, self.opts)
+                gt_class_2 = int(gt_encoding.get_class_id(label_enc_2))
+                gt_coords_enc_2 = gt_encoding.get_coords_enc(label_enc_2)
+                gt_coords_dec_2 = CommonEncoding.decode_boxes_wrt_anchor_np(gt_coords_enc_2, self.opts)
                 if gt_class_2 != self.background_id:
                     class_and_coords = np.concatenate([np.expand_dims(gt_class_2, axis=0), gt_coords_dec_2], axis=0)  # (5)
                     class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
@@ -390,22 +420,29 @@ class SingleCellArch:
         os.makedirs(self.comparison_diff_correct)
         os.makedirs(self.comparison_diff_wrong)
 
-    def write_eval_debug_info(self, metrics, inputs_reord, labels_enc_reord, loc_and_classif, comparisons_pred, comps_validity_labels, comparisons_indices, filenames):
+    def write_eval_debug_info(self, metrics, inputs_reord, labels_enc_reord, net_output, comparisons_pred, comps_validity_labels, comparisons_indices, filenames):
         # inputs_reord: (batch_size, input_image_size, input_image_size, 3)
         # labels_enc_reord: (batch_size, n_labels)
-        # loc_and_classif: (batch_size, 4+nclasses)
+        # net_output: (batch_size, ?)
         # comparisons_pred: (total_comparisons, 2)
         # comps_validity_labels: (total_comparisons, 2)  [validity, label]
         # comparisons_indices: (total_comparisons, 2)
         # filenames: (n_images_per_batch)
+
+        # Split net output:
+        locs_enc = output_encoding.get_loc_enc(net_output)  # (batch_size, 4)
+        logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nclasses)
+        pc = output_encoding.get_pc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
+        dc = output_encoding.get_dc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
+
         if self.classnames is None:
             raise Exception('classnames must be specified if debugging.')
         self.batch_count_eval_debug += 1
         batch_size = self.opts.n_crops_per_image * self.opts.n_images_per_batch
         filenames_ext = np.tile(np.expand_dims(filenames, axis=-1), [1, self.opts.n_crops_per_image])  # (n_images_per_batch, n_crops_per_image)
         filenames_reord = np.reshape(filenames_ext, newshape=(batch_size))  # (batch_size)
-        mask_match = CommonEncoding.get_mask_match(labels_enc_reord) > 0.5  # (batch_size)
-        mask_neutral = CommonEncoding.get_mask_neutral(labels_enc_reord) > 0.5  # (batch_size)
+        mask_match = gt_encoding.get_mask_match(labels_enc_reord) > 0.5  # (batch_size)
+        mask_neutral = gt_encoding.get_mask_neutral(labels_enc_reord) > 0.5  # (batch_size)
 
         # Localizations:
         for i in range(batch_size):
@@ -414,10 +451,10 @@ class SingleCellArch:
                 crop = inputs_reord[i, ...]  # (input_image_size, input_image_size, 3)
                 crop = tools.add_mean_again(crop)
                 label_enc = labels_enc_reord[i, :]
-                gt_class = int(CommonEncoding.get_gt_class(label_enc))
+                gt_class = int(gt_encoding.get_class_id(label_enc))
                 is_match = mask_match[i]
                 is_neutral = mask_neutral[i]
-                predicted_class = np.argmax(loc_and_classif[i, 4:])
+                predicted_class = np.argmax(logits[i, :])
                 if not is_neutral:
                     file_name = 'batch' + str(self.batch_count_eval_debug) + '_' + name + '_crop' + str(i) + '_GT-' + \
                                 self.classnames[gt_class] + '_PRED-' + self.classnames[predicted_class] + '.png'
@@ -427,16 +464,16 @@ class SingleCellArch:
                         crop_path = os.path.join(self.wrong_class_dir, file_name)
 
                     if gt_class != self.background_id:
-                        gt_coords_enc = CommonEncoding.get_gt_coords(label_enc)
-                        gt_coords_dec = CommonEncoding.decode_boxes_np(gt_coords_enc, self.opts)
+                        gt_coords_enc = gt_encoding.get_coords_enc(label_enc)
+                        gt_coords_dec = CommonEncoding.decode_boxes_wrt_anchor_np(gt_coords_enc, self.opts)
                         class_and_coords = np.concatenate([np.expand_dims(gt_class, axis=0), gt_coords_dec], axis=0)  # (5)
                         class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
                         crop = tools.add_bounding_boxes_to_image(crop, class_and_coords, color=(255, 0, 0))
                     else:
                         assert not is_match, 'is_match is True, and gt_class it background_id.'
                     if predicted_class != self.background_id:
-                        predicted_coords_enc = loc_and_classif[i, :4]
-                        predicted_coords_dec = CommonEncoding.decode_boxes_np(predicted_coords_enc, self.opts)
+                        predicted_coords_enc = locs_enc[i, :]
+                        predicted_coords_dec = CommonEncoding.decode_boxes_wrt_anchor_np(predicted_coords_enc, self.opts)
                         class_and_coords = np.concatenate([np.expand_dims(predicted_class, axis=0), predicted_coords_dec], axis=0)  # (5)
                         class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
                         crop = tools.add_bounding_boxes_to_image(crop, class_and_coords, color=(127, 0, 127))
@@ -478,21 +515,21 @@ class SingleCellArch:
                     crop2 = tools.add_mean_again(crop2)
                     # Box of crop 1:
                     label_enc_1 = labels_enc_reord[idx1, :]
-                    gt_class_1 = int(CommonEncoding.get_gt_class(label_enc_1))
-                    gt_idx_1 = int(CommonEncoding.get_nearest_valid_gt_idx(label_enc_1))
+                    gt_class_1 = int(gt_encoding.get_class_id(label_enc_1))
+                    gt_idx_1 = int(gt_encoding.get_associated_gt_idx(label_enc_1))
                     if gt_class_1 != self.background_id:
-                        gt_coords_enc_1 = CommonEncoding.get_gt_coords(label_enc_1)
-                        gt_coords_dec_1 = CommonEncoding.decode_boxes_np(gt_coords_enc_1, self.opts)
+                        gt_coords_enc_1 = gt_encoding.get_coords_enc(label_enc_1)
+                        gt_coords_dec_1 = CommonEncoding.decode_boxes_wrt_anchor_np(gt_coords_enc_1, self.opts)
                         class_and_coords = np.concatenate([np.expand_dims(gt_class_1, axis=0), gt_coords_dec_1], axis=0)  # (5)
                         class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
                         crop1 = tools.add_bounding_boxes_to_image(crop1, class_and_coords, color=(255, 0, 0))
                     # Box of crop 2:
                     label_enc_2 = labels_enc_reord[idx2, :]
-                    gt_class_2 = int(CommonEncoding.get_gt_class(label_enc_2))
-                    gt_idx_2 = int(CommonEncoding.get_nearest_valid_gt_idx(label_enc_2))
+                    gt_class_2 = int(gt_encoding.get_class_id(label_enc_2))
+                    gt_idx_2 = int(gt_encoding.get_associated_gt_idx(label_enc_2))
                     if gt_class_2 != self.background_id:
-                        gt_coords_enc_2 = CommonEncoding.get_gt_coords(label_enc_2)
-                        gt_coords_dec_2 = CommonEncoding.decode_boxes_np(gt_coords_enc_2, self.opts)
+                        gt_coords_enc_2 = gt_encoding.get_coords_enc(label_enc_2)
+                        gt_coords_dec_2 = CommonEncoding.decode_boxes_wrt_anchor_np(gt_coords_enc_2, self.opts)
                         class_and_coords = np.concatenate([np.expand_dims(gt_class_2, axis=0), gt_coords_dec_2], axis=0)  # (5)
                         class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
                         crop2 = tools.add_bounding_boxes_to_image(crop2, class_and_coords, color=(255, 0, 0))
@@ -594,7 +631,7 @@ def localization_loss_and_metric(pred_coords, mask_match, mask_neutral, gt_coord
     with tf.variable_scope('loc_loss'):
         localization_loss = CommonEncoding.smooth_L1_loss(gt_coords, pred_coords)  # (batch_size)
         valids_for_loc = tf.logical_or(mask_match, mask_neutral)  # (batch_size)
-        n_valids = tf.reduce_sum(tf.cast(valids_for_loc, tf.int32), name='n_valids_loc')  # ()
+        n_valids = tf.reduce_sum(tf.cast(valids_for_loc, tf.int32), name='n_valids')  # ()
         n_valids_safe = tf.maximum(tf.cast(n_valids, tf.float32), 1)
         localization_loss_matches = tf.where(valids_for_loc, localization_loss, zeros, name='loss_match')  # (batch_size)
         loss_loc_summed = tf.reduce_sum(localization_loss_matches, name='loss_summed')  # ()
@@ -602,8 +639,8 @@ def localization_loss_and_metric(pred_coords, mask_match, mask_neutral, gt_coord
         loss_loc = tf.multiply(loss_loc_scaled, loc_loss_factor, name='loss_loc')  # ()
 
         # Metric:
-        pred_coords_dec = decode_boxes_tf(pred_coords, opts)  # (batch_size, 4)
-        gt_coords_dec = decode_boxes_tf(gt_coords, opts)  # (batch_size, 4)
+        pred_coords_dec = CommonEncoding.decode_boxes_wrt_anchor_tf(pred_coords, opts)  # (batch_size, 4)
+        gt_coords_dec = CommonEncoding.decode_boxes_wrt_anchor_tf(gt_coords, opts)  # (batch_size, 4)
         iou = compute_iou_tf(pred_coords_dec, gt_coords_dec)  # (batch_size)
         iou_matches = tf.where(valids_for_loc, iou, zeros)  # (batch_size)
         iou_summed = tf.reduce_sum(iou_matches)  # ()
@@ -635,6 +672,60 @@ def comparison_loss_and_metric(comparisons_pred, comps_validity_labels, comp_los
         n_hits = tf.reduce_sum(hits_valids)  # ()
         accuracy_comp = tf.divide(n_hits, n_valids_safe)  # ()
     return loss_comp, accuracy_comp
+
+
+def pc_loss_and_metric(pc_pred, pc_label, mask_match, mask_neutral, zeros, pc_loss_factor):
+    # pc_pred: (batch_size) encoded
+    # pc_label: (batch_size) encoded
+    # mask_match: (batch_size)
+    # mask_neutral: (batch_size)
+    # zeros: (batch_size)
+    with tf.variable_scope('pc_loss'):
+        # Loss:
+        pc_loss_orig = CommonEncoding.smooth_L1_loss(pc_label, pc_pred)  # (batch_size)
+        valids_for_pc = tf.logical_or(mask_match, mask_neutral)  # (batch_size)
+        n_valids = tf.reduce_sum(tf.cast(valids_for_pc, tf.int32), name='n_valids')  # ()
+        n_valids_safe = tf.maximum(tf.cast(n_valids, tf.float32), 1)
+        pc_loss_matches = tf.where(valids_for_pc, pc_loss_orig, zeros, name='loss_match')  # (batch_size)
+        pc_loc_summed = tf.reduce_sum(pc_loss_matches, name='loss_summed')  # ()
+        pc_loc_scaled = tf.divide(pc_loc_summed, n_valids_safe, name='loss_scaled')  # ()
+        loss_pc = tf.multiply(pc_loc_scaled, pc_loss_factor, name='loss_pc')  # ()
+
+        # Metric:
+        pc_pred_dec = CommonEncoding.decode_pc_np(pc_pred)  # (batch_size)
+        pc_label_dec = CommonEncoding.decode_pc_np(pc_label)  # (batch_size)
+        abs_difference = tf.abs(pc_pred_dec - pc_label_dec)  # (batch_size)
+        diff_masked = tf.where(valids_for_pc, abs_difference, zeros)  # (batch_size)
+        diff_sum = tf.reduce_sum(diff_masked)  # ()
+        diff_mean = tf.divide(diff_sum, n_valids_safe, name='diff_mean')  # ()
+    return loss_pc, diff_mean
+
+
+def dc_loss_and_metric(dc_pred, dc_label, mask_match, mask_neutral, zeros, dc_loss_factor):
+    # dc_pred: (batch_size) encoded
+    # dc_label: (batch_size) encoded
+    # mask_match: (batch_size)
+    # mask_neutral: (batch_size)
+    # zeros: (batch_size)
+    with tf.variable_scope('dc_loss'):
+        # Loss:
+        dc_loss_orig = CommonEncoding.smooth_L1_loss(dc_label, dc_pred)  # (batch_size)
+        valids_for_dc = tf.logical_or(mask_match, mask_neutral)  # (batch_size)
+        n_valids = tf.reduce_sum(tf.cast(valids_for_dc, tf.int32), name='n_valids')  # ()
+        n_valids_safe = tf.maximum(tf.cast(n_valids, tf.float32), 1)
+        dc_loss_matches = tf.where(valids_for_dc, dc_loss_orig, zeros, name='loss_match')  # (batch_size)
+        dc_loc_summed = tf.reduce_sum(dc_loss_matches, name='loss_summed')  # ()
+        dc_loc_scaled = tf.divide(dc_loc_summed, n_valids_safe, name='loss_scaled')  # ()
+        loss_dc = tf.multiply(dc_loc_scaled, dc_loss_factor, name='loss_dc')  # ()
+
+        # Metric:
+        dc_pred_dec = CommonEncoding.decode_dc_np(dc_pred)  # (batch_size)
+        dc_label_dec = CommonEncoding.decode_dc_np(dc_label)  # (batch_size)
+        abs_difference = tf.abs(dc_pred_dec - dc_label_dec)  # (batch_size)
+        diff_masked = tf.where(valids_for_dc, abs_difference, zeros)  # (batch_size)
+        diff_sum = tf.reduce_sum(diff_masked)  # ()
+        diff_mean = tf.divide(diff_sum, n_valids_safe, name='diff_mean')  # ()
+    return loss_dc, diff_mean
 
 
 def simplify_batch_dimensions(x):
@@ -688,78 +779,4 @@ def compute_iou_tf(boxes1, boxes2):
     union_area = boxes1_area + boxes2_area - intersection_area  # (batch_size)
     iou = intersection_area / union_area  # (batch_size)
     return iou
-
-
-def encode_boxes_np(coords_raw, opts):
-    # coords_raw: (4)
-    xmin = coords_raw[0]
-    ymin = coords_raw[1]
-    width = coords_raw[2]
-    height = coords_raw[3]
-
-    xc = xmin + 0.5 * width
-    yc = ymin + 0.5 * height
-
-    dcx = (0.5 - xc) / 0.5
-    dcy = (0.5 - yc) / 0.5
-    # Between -1 and 1 for the box to lie inside the anchor.
-
-    # Encoding step:
-    if opts.encoding_method == 'basic_1':
-        dcx_enc = np.tan(dcx * (np.pi / 2.0 - opts.enc_epsilon))
-        dcy_enc = np.tan(dcy * (np.pi / 2.0 - opts.enc_epsilon))
-        w_enc = CommonEncoding.logit((width - opts.enc_wh_b) / opts.enc_wh_a)
-        h_enc = CommonEncoding.logit((height - opts.enc_wh_b) / opts.enc_wh_a)
-    elif opts.encoding_method == 'ssd':
-        dcx_enc = dcx * 10.0
-        dcy_enc = dcy * 10.0
-        w_enc = np.log(width) * 5.0
-        h_enc = np.log(height) * 5.0
-    elif opts.encoding_method == 'no_encode':
-        dcx_enc = dcx
-        dcy_enc = dcy
-        w_enc = width
-        h_enc = height
-    else:
-        raise Exception('Encoding method not recognized.')
-
-    coords_enc = np.stack([dcx_enc, dcy_enc, w_enc, h_enc], axis=0)  # (4)
-
-    return coords_enc  # (4) [dcx_enc, dcy_enc, w_enc, h_enc]
-
-def decode_boxes_tf(coords_enc, opts):
-    # coords_enc: (..., 4)
-    dcx_enc = coords_enc[..., 0]
-    dcy_enc = coords_enc[..., 1]
-    w_enc = coords_enc[..., 2]
-    h_enc = coords_enc[..., 3]
-
-    # Decoding step:
-    if opts.encoding_method == 'basic_1':
-        dcx_rel = tf.clip_by_value(tf.atan(dcx_enc) / (np.pi / 2.0 - opts.enc_epsilon), -1.0, 1.0)
-        dcy_rel = tf.clip_by_value(tf.atan(dcy_enc) / (np.pi / 2.0 - opts.enc_epsilon), -1.0, 1.0)
-        width = tf.clip_by_value(CommonEncoding.sigmoid(w_enc) * opts.enc_wh_a + opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)
-        height = tf.clip_by_value(CommonEncoding.sigmoid(h_enc) * opts.enc_wh_a + opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)
-    elif opts.encoding_method == 'ssd':
-        dcx_rel = tf.clip_by_value(dcx_enc * 0.1, -1.0, 1.0)
-        dcy_rel = tf.clip_by_value(dcy_enc * 0.1, -1.0, 1.0)
-        width = tf.clip_by_value(tf.exp(w_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)
-        height = tf.clip_by_value(tf.exp(h_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)
-    elif opts.encoding_method == 'no_encode':
-        dcx_rel = tf.clip_by_value(dcx_enc, -1.0, 1.0)
-        dcy_rel = tf.clip_by_value(dcy_enc, -1.0, 1.0)
-        width = tf.clip_by_value(w_enc, 1.0 / network.receptive_field_size, 1.0)
-        height = tf.clip_by_value(h_enc, 1.0 / network.receptive_field_size, 1.0)
-    else:
-        raise Exception('Encoding method not recognized.')
-
-    xc = 0.5 - dcx_rel * 0.5  # (...)
-    yc = 0.5 - dcy_rel * 0.5  # (...)
-
-    xmin = xc - 0.5 * width  # (...)
-    ymin = yc - 0.5 * height  # (...)
-
-    coords_raw = tf.stack([xmin, ymin, width, height], axis=-1)  # (..., 4)
-
-    return coords_raw  # (..., 4) [xmin, ymin, width, height]
 

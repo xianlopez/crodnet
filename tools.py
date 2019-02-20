@@ -255,6 +255,7 @@ def add_bounding_boxes_to_image2(image, bboxes, classnames, color=(0,0,255), lin
         classid = int(bboxes[i, 0])
         conf = bboxes[i, 5]
         cv2.rectangle(image, (xmin, ymin), (xmin + w, ymin + h), color, line_width)
+        cv2.rectangle(image, (xmin, ymin - 20), (xmin + w, ymin), (125, 125, 125), -1)
         cv2.putText(image, classnames[classid] + ' : %.2f' % conf, (xmin + 5, ymin - 7),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
     return image

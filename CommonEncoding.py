@@ -3,14 +3,45 @@ import numpy as np
 import network
 
 
-def decode_boxes_np(coords_enc, opts):
-    # coords_enc: (..., 4)
-    dcx_enc = coords_enc[..., 0]
-    dcy_enc = coords_enc[..., 1]
-    w_enc = coords_enc[..., 2]
-    h_enc = coords_enc[..., 3]
+def encode_boxes_wrt_anchor_np(coords_raw, opts):
+    # coords_raw: (4)
+    xmin = coords_raw[0]
+    ymin = coords_raw[1]
+    width = coords_raw[2]
+    height = coords_raw[3]
 
-    # Decoding step:
+    xc = xmin + 0.5 * width
+    yc = ymin + 0.5 * height
+
+    dcx = (0.5 - xc) / 0.5
+    dcy = (0.5 - yc) / 0.5
+    # Between -1 and 1 for the box to lie inside the anchor.
+
+    # Encoding step:
+    if opts.encoding_method == 'basic_1':
+        dcx_enc = np.tan(dcx * (np.pi / 2.0 - opts.enc_epsilon))
+        dcy_enc = np.tan(dcy * (np.pi / 2.0 - opts.enc_epsilon))
+        w_enc = logit((width - opts.enc_wh_b) / opts.enc_wh_a)
+        h_enc = logit((height - opts.enc_wh_b) / opts.enc_wh_a)
+    elif opts.encoding_method == 'ssd':
+        dcx_enc = dcx * 10.0
+        dcy_enc = dcy * 10.0
+        w_enc = np.log(width) * 5.0
+        h_enc = np.log(height) * 5.0
+    elif opts.encoding_method == 'no_encode':
+        dcx_enc = dcx
+        dcy_enc = dcy
+        w_enc = width
+        h_enc = height
+    else:
+        raise Exception('Encoding method not recognized.')
+
+    coords_enc = np.stack([dcx_enc, dcy_enc, w_enc, h_enc], axis=0)  # (4)
+
+    return coords_enc  # (4) [dcx_enc, dcy_enc, w_enc, h_enc]
+
+
+def decoding_split_np(dcx_enc, dcy_enc, w_enc, h_enc, opts):
     if opts.encoding_method == 'basic_1':
         dcx_rel = np.clip(np.arctan(dcx_enc) / (np.pi / 2.0 - opts.enc_epsilon), -1.0, 1.0)
         dcy_rel = np.clip(np.arctan(dcy_enc) / (np.pi / 2.0 - opts.enc_epsilon), -1.0, 1.0)
@@ -28,198 +59,66 @@ def decode_boxes_np(coords_enc, opts):
         height = np.clip(h_enc, 1.0 / network.receptive_field_size, 1.0)
     else:
         raise Exception('Encoding method not recognized.')
+    return dcx_rel, dcy_rel, width, height
+
+
+def decoding_split_tf(dcx_enc, dcy_enc, w_enc, h_enc, opts):
+    if opts.encoding_method == 'basic_1':
+        dcx_rel = tf.clip_by_value(tf.atan(dcx_enc) / (np.pi / 2.0 - opts.enc_epsilon), -1.0, 1.0)
+        dcy_rel = tf.clip_by_value(tf.atan(dcy_enc) / (np.pi / 2.0 - opts.enc_epsilon), -1.0, 1.0)
+        width = tf.clip_by_value(sigmoid(w_enc) * opts.enc_wh_a + opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)
+        height = tf.clip_by_value(sigmoid(h_enc) * opts.enc_wh_a + opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)
+    elif opts.encoding_method == 'ssd':
+        dcx_rel = tf.clip_by_value(dcx_enc * 0.1, -1.0, 1.0)
+        dcy_rel = tf.clip_by_value(dcy_enc * 0.1, -1.0, 1.0)
+        width = tf.clip_by_value(tf.exp(w_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)
+        height = tf.clip_by_value(tf.exp(h_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)
+    elif opts.encoding_method == 'no_encode':
+        dcx_rel = tf.clip_by_value(dcx_enc, -1.0, 1.0)
+        dcy_rel = tf.clip_by_value(dcy_enc, -1.0, 1.0)
+        width = tf.clip_by_value(w_enc, 1.0 / network.receptive_field_size, 1.0)
+        height = tf.clip_by_value(h_enc, 1.0 / network.receptive_field_size, 1.0)
+    else:
+        raise Exception('Encoding method not recognized.')
+    return dcx_rel, dcy_rel, width, height
+
+
+def decode_boxes_wrt_anchor_tf(coords_enc, opts):
+    # coords_enc: (..., 4)
+    dcx_enc = coords_enc[..., 0]
+    dcy_enc = coords_enc[..., 1]
+    w_enc = coords_enc[..., 2]
+    h_enc = coords_enc[..., 3]
+
+    # Decoding step:
+    dcx_rel, dcy_rel, width, height = decoding_split_tf(dcx_enc, dcy_enc, w_enc, h_enc, opts)
 
     xc = 0.5 - dcx_rel * 0.5  # (...)
     yc = 0.5 - dcy_rel * 0.5  # (...)
-
     xmin = xc - 0.5 * width  # (...)
     ymin = yc - 0.5 * height  # (...)
-
-    coords_raw = np.stack([xmin, ymin, width, height], axis=-1)  # (..., 4)
+    coords_raw = tf.stack([xmin, ymin, width, height], axis=-1)  # (..., 4)
 
     return coords_raw  # (..., 4) [xmin, ymin, width, height]
 
 
-def split_net_output_tf(net_output, opts, nclasses):
-    if opts.predict_coordinates:
-        if opts.box_per_class:
-            if opts.predict_pc:
-                # [cl1_conf, cl1_dcx_enc, cl1_dcy_enc, cl1_w_enc, cl1_h_enc, cl1_pc, cl2...]
-                net_output_conf = net_output[..., 0:(nclasses*6):6]
-                dcx_enc = net_output[..., 1:(nclasses*6):6]  # (..., n_classes)
-                dcy_enc = net_output[..., 2:(nclasses*6):6]  # (..., n_classes)
-                w_enc = net_output[..., 3:(nclasses*6):6]  # (..., n_classes)
-                h_enc = net_output[..., 4:(nclasses*6):6]  # (..., n_classes)
-                net_output_coords = tf.concat([dcx_enc, dcy_enc, w_enc, h_enc], axis=-1)  # (..., 4 * n_classes)
-                net_output_pc = net_output[..., 5:(nclasses*6):6]  # (..., n_classes)
-            else:
-                # [cl1_conf, cl1_dcx_enc, cl1_dcy_enc, cl1_w_enc, cl1_h_enc, cl2...]
-                net_output_conf = net_output[..., 0:(nclasses*5):5]
-                dcx_enc = net_output[..., 1:(nclasses*5):5]  # (..., n_classes)
-                dcy_enc = net_output[..., 2:(nclasses*5):5]  # (..., n_classes)
-                w_enc = net_output[..., 3:(nclasses*5):5]  # (..., n_classes)
-                h_enc = net_output[..., 4:(nclasses*5):5]  # (..., n_classes)
-                net_output_coords = tf.concat([dcx_enc, dcy_enc, w_enc, h_enc], axis=-1)  # (..., 4 * n_classes)
-                net_output_pc = None
-        else:
-            if opts.predict_pc:
-                # [cl1_conf, cl2_conf, ..., dcx_enc, dcy_enc, w_enc, h_enc, pc]
-                net_output_conf = net_output[..., :nclasses]
-                net_output_coords = net_output[..., nclasses:(nclasses+4)]  # (..., 4)
-                net_output_pc = net_output[..., (nclasses+4)]  # (...)
-            else:
-                # [cl1_conf, cl2_conf, ..., dcx_enc, dcy_enc, w_enc, h_enc]
-                net_output_conf = net_output[..., :nclasses]
-                net_output_coords = net_output[..., nclasses:]  # (..., 4)
-                net_output_pc = None
-    else:
-        # [cl1_conf, cl2_conf, ...]
-        net_output_conf = net_output[..., :nclasses]
-        net_output_coords = None
-        net_output_pc = None
-    # net_output_conf: (..., nclasses)
-    # net_output_coords: (..., ?)
-    # net_output_pc: (..., ?)
-    return net_output_conf, net_output_coords, net_output_pc
+def decode_boxes_wrt_anchor_np(coords_enc, opts):
+    # coords_enc: (..., 4)
+    dcx_enc = coords_enc[..., 0]
+    dcy_enc = coords_enc[..., 1]
+    w_enc = coords_enc[..., 2]
+    h_enc = coords_enc[..., 3]
 
+    # Decoding step:
+    dcx_rel, dcy_rel, width, height = decoding_split_np(dcx_enc, dcy_enc, w_enc, h_enc, opts)
 
-def put_together_net_output(net_output_conf, net_output_coords, net_output_pc, opts, nclasses):
-    # net_output_conf: (..., nclasses)
-    # net_output_coords: (..., ?)
-    # net_output_pc: (..., ?)
-    conf_shape = tf.shape(net_output_conf)
-    left_dimensions = conf_shape[:-1]
-    if opts.predict_coordinates:
-        if opts.box_per_class:
-            if opts.predict_pc:
-                # [cl1_conf, cl1_dcx_enc, cl1_dcy_enc, cl1_w_enc, cl1_h_enc, cl1_pc, cl2...]
-                concatenated = tf.stack([net_output_conf, net_output_coords[..., 0:(nclasses*4):4],
-                                          net_output_coords[..., 1:(nclasses*4):4],
-                                          net_output_coords[..., 2:(nclasses*4):4],
-                                          net_output_coords[..., 3:(nclasses*4):4],
-                                          net_output_pc], axis=-1)  # (..., n_classes, 6)
-                net_output = tf.reshape(concatenated, shape=tf.concat([left_dimensions, tf.constant(nclasses*6)], axis=0))
-            else:
-                # [cl1_conf, cl1_dcx_enc, cl1_dcy_enc, cl1_w_enc, cl1_h_enc, cl2...]
-                concatenated = tf.stack([net_output_conf, net_output_coords[..., 0:(nclasses*4):4],
-                                          net_output_coords[..., 1:(nclasses*4):4],
-                                          net_output_coords[..., 2:(nclasses*4):4],
-                                          net_output_coords[..., 3:(nclasses*4):4]], axis=-1)  # (..., n_classes, 5)
-                net_output = tf.reshape(concatenated, shape=tf.concat([left_dimensions, tf.constant(nclasses*5)], axis=0))
-        else:
-            if opts.predict_pc:
-                # [cl1_conf, cl2_conf, ..., dcx_enc, dcy_enc, w_enc, h_enc, pc]
-                net_output = tf.concat([net_output_conf, net_output_coords, net_output_pc], axis=-1)  # (..., n_classes + 5)
-            else:
-                # [cl1_conf, cl2_conf, ..., dcx_enc, dcy_enc, w_enc, h_enc]
-                net_output = tf.concat([net_output_conf, net_output_coords], axis=-1)  # (..., n_classes + 4)
-    else:
-        # [cl1_conf, cl1_dcx_enc, cl1_dcy_enc, cl1_w_enc, cl1_h_enc, cl1_pc, cl2...]
-        net_output = net_output_conf  # (..., n_classes)
-    # net_output: (..., ?)
-    return net_output
+    xc = 0.5 - dcx_rel * 0.5  # (...)
+    yc = 0.5 - dcy_rel * 0.5  # (...)
+    xmin = xc - 0.5 * width  # (...)
+    ymin = yc - 0.5 * height  # (...)
+    coords_raw = np.stack([xmin, ymin, width, height], axis=-1)  # (..., 4)
 
-
-def get_last_layer_n_channels(opts, nclasses):
-    if opts.predict_coordinates:
-        if opts.box_per_class:
-            if opts.predict_pc:
-                n_channels_final = nclasses * 6  # For each class, a confidence, four coordinates and pc.
-                # [cl1_conf, cl1_dcx_enc, cl1_dcy_enc, cl1_w_enc, cl1_h_enc, cl1_pc, cl2...]
-            else:
-                n_channels_final = nclasses * 5  # For each class, a confidence and four coordinates.
-                # [cl1_conf, cl1_dcx_enc, cl1_dcy_enc, cl1_w_enc, cl1_h_enc, cl2...]
-        else:
-            if opts.predict_pc:
-                n_channels_final = nclasses + 5  # A confidence for each class, plus four coordinates and pc.
-                # [cl1_conf, cl2_conf, ..., dcx_enc, dcy_enc, w_enc, h_enc, pc]
-            else:
-                n_channels_final = nclasses + 4  # A confidence for each class, plus four coordinates.
-                # [cl1_conf, cl2_conf, ..., dcx_enc, dcy_enc, w_enc, h_enc]
-    else:
-        n_channels_final = nclasses  # A confidence for each class.
-        # [cl1_conf, cl2_conf, ...]
-        if opts.predict_pc:
-            raise Exception('Option predict_pc not available when not predicting coordinates.')
-    return n_channels_final
-
-
-def split_net_output_np(net_output, opts, nclasses):
-    # net_output: (..., ?)
-    if opts.predict_coordinates:
-        if opts.box_per_class:
-            if opts.predict_pc:
-                # net_output: (..., 6 * nclasses)
-                # [cl1_conf, cl1_dcx_enc, cl1_dcy_enc, cl1_w_enc, cl1_h_enc, cl1_pc, cl2...]
-                net_output_conf = net_output[..., 0:(nclasses*6):6]
-                dcx_enc = net_output[..., 1:(nclasses*6):6]  # (..., n_classes)
-                dcy_enc = net_output[..., 2:(nclasses*6):6]  # (..., n_classes)
-                w_enc = net_output[..., 3:(nclasses*6):6]  # (..., n_classes)
-                h_enc = net_output[..., 4:(nclasses*6):6]  # (..., n_classes)
-                net_output_coords = np.concatenate([dcx_enc, dcy_enc, w_enc, h_enc], axis=-1)  # (..., 4 * n_classes)
-                net_output_pc = net_output[..., 5:(nclasses*6):6]  # (..., n_classes)
-            else:
-                # net_output: (..., 5 * nclasses)
-                # [cl1_conf, cl1_dcx_enc, cl1_dcy_enc, cl1_w_enc, cl1_h_enc, cl2...]
-                net_output_conf = net_output[..., 0:(nclasses*5):5]
-                dcx_enc = net_output[..., 1:(nclasses*5):5]  # (..., n_classes)
-                dcy_enc = net_output[..., 2:(nclasses*5):5]  # (..., n_classes)
-                w_enc = net_output[..., 3:(nclasses*5):5]  # (..., n_classes)
-                h_enc = net_output[..., 4:(nclasses*5):5]  # (..., n_classes)
-                net_output_coords = np.concatenate([dcx_enc, dcy_enc, w_enc, h_enc], axis=-1)  # (..., 4 * n_classes)
-                net_output_pc = None
-        else:
-            if opts.predict_pc:
-                # net_output: (..., nclasses + 5)
-                # [cl1_conf, cl2_conf, ..., dcx_enc, dcy_enc, w_enc, h_enc, pc]
-                net_output_conf = net_output[..., :nclasses]
-                net_output_coords = net_output[..., nclasses:(nclasses+4)]  # (..., 4)
-                net_output_pc = net_output[..., (nclasses+4)]  # (...)
-            else:
-                # net_output: (..., nclasses + 4)
-                # [cl1_conf, cl2_conf, ..., dcx_enc, dcy_enc, w_enc, h_enc]
-                net_output_conf = net_output[..., :nclasses]
-                net_output_coords = net_output[..., nclasses:]  # (..., 4)
-                net_output_pc = None
-    else:
-        # net_output: (..., nclasses)
-        # [cl1_conf, cl2_conf, ...]
-        net_output_conf = net_output
-        net_output_coords = None
-        net_output_pc = None
-    # net_output_conf: (..., nclasses)
-    # net_output_coords: (..., ?)
-    # net_output_pc: (..., ?)
-    return net_output_conf, net_output_coords, net_output_pc
-
-
-# This is used in case we compute a set of coordinates per class.
-def get_selected_coords_tf(indices_mesh, net_output_coords, nclasses):
-    # net_output_coords: (..., 4 * nclasses)
-    # [dcx_enc_cl1, dcx_enc_cl2, ..., dcy_enc_cl1, dcy_enc_cl2, ..., w_enc_cl1, w_enc_cl2, ..., h_enc_cl1, h_enc_cl2, ...]
-    selected_dcx_enc = tf.gather_nd(net_output_coords[..., :nclasses], indices_mesh)  # (...)
-    selected_dcy_enc = tf.gather_nd(net_output_coords[..., nclasses:(2*nclasses)], indices_mesh)  # (...)
-    selected_w_enc = tf.gather_nd(net_output_coords[..., (2*nclasses):(3*nclasses)], indices_mesh)  # (...)
-    selected_h_enc = tf.gather_nd(net_output_coords[..., (3*nclasses):], indices_mesh)  # (...)
-    selected_coords = tf.stack([selected_dcx_enc, selected_dcy_enc, selected_w_enc, selected_h_enc], axis=-1)  # (..., 4)
-    return selected_coords
-
-
-def get_selected_coords_np(net_output_conf, net_output_coords, nclasses, box_per_class):
-    # net_output_conf: (..., nclasses)
-    # net_output_coords: (..., 4 * nclasses)
-    # [dcx_enc_cl1, dcx_enc_cl2, ..., dcy_enc_cl1, dcy_enc_cl2, ..., w_enc_cl1, w_enc_cl2, ..., h_enc_cl1, h_enc_cl2, ...]
-    if box_per_class:
-        indices = np.argmax(net_output_conf, axis=-1)  # (...)
-        indices_exp = np.expand_dims(indices, axis=-1)  # (..., 1)
-        selected_dcx_enc = np.take_along_axis(net_output_coords[..., :nclasses], indices_exp, axis=-1)  # (..., 1)
-        selected_dcy_enc = np.take_along_axis(net_output_coords[..., nclasses:(2*nclasses)], indices_exp, axis=-1)  # (..., 1)
-        selected_w_enc = np.take_along_axis(net_output_coords[..., (2*nclasses):(3*nclasses)], indices_exp, axis=-1)  # (..., 1)
-        selected_h_enc = np.take_along_axis(net_output_coords[..., (3*nclasses):], indices_exp, axis=-1)  # (..., 1)
-        selected_coords = np.concatenate([selected_dcx_enc, selected_dcy_enc, selected_w_enc, selected_h_enc], axis=-1)  # (..., 4)
-        return selected_coords
-    else:
-        return net_output_coords
+    return coords_raw  # (..., 4) [xmin, ymin, width, height]
 
 
 def logit(x):
@@ -242,31 +141,32 @@ def smooth_L1_loss(y_true, y_pred, reduce_last_dim=True):
         return l1_loss
 
 
-def get_mask_match(labels_enc):
-    # labels_enc_reord: (..., 9)
-    return labels_enc[..., 4]
+def decode_pc_np(pc_enc):
+    return decode_pc_or_dc_np(pc_enc)
 
 
-def get_mask_neutral(labels_enc):
-    # labels_enc_reord: (..., 9)
-    return labels_enc[..., 5]
+def decode_dc_np(dc_enc):
+    return decode_pc_or_dc_np(dc_enc)
 
 
-def get_gt_class(labels_enc):
-    # labels_enc_reord: (..., 9)
-    return labels_enc[..., 6]
+def decode_pc_or_dc_np(x_enc):
+    # x_enc: any shape
+    x_dec = np.clip(np.exp(x_enc * 0.2), 0.0, 1.0)
+    return x_dec
 
 
-def get_nearest_valid_gt_idx(labels_enc):
-    # labels_enc_reord: (..., 9)
-    return labels_enc[..., 7]
+def encode_pc_or_dc_np(x_dec):
+    # x_dec: any shape
+    x_enc = np.log(x_dec) * 5.0
+    return x_enc
 
 
-def get_pc_associated(labels_enc):
-    # labels_enc_reord: (..., 9)
-    return labels_enc[..., 8]
 
 
-def get_gt_coords(labels_enc):
-    # labels_enc_reord: (..., 9)
-    return labels_enc[..., :4]
+
+
+
+
+
+
+

@@ -1,16 +1,13 @@
 import tensorflow as tf
-import tensorflow.contrib.slim as slim
 import numpy as np
-from BoundingBoxes import BoundingBox, PredictedBox
 import operator
 import os
 import cv2
 import tools
-import sys
-import scipy
 import network
 from GridLevel import GridLevel
 import CommonEncoding
+import output_encoding
 
 
 class MultiCellArch:
@@ -24,6 +21,9 @@ class MultiCellArch:
             size_pad = self.opts.grid_levels_size_pad[i]
             self.grid_levels.append(GridLevel(size_pad[0], size_pad[1]))
         self.grid_levels.sort(key=operator.attrgetter('input_size'))
+        self.input_image_size = 0
+        for size_pad in self.opts.grid_levels_size_pad:
+            self.input_image_size = max(self.input_image_size, size_pad[0])
         self.n_boxes = -1
         self.max_pad_rel = -1
         self.max_pad_abs = -1
@@ -54,12 +54,12 @@ class MultiCellArch:
     def get_expected_num_boxes(self):
         expected_n_boxes = 0
         for grid in self.grid_levels:
-            dim_this_grid = 1 + (grid.input_size_w_pad - network.receptive_field_size) // self.opts.step_in_pixels
+            dim_this_grid = 1 + (grid.input_size_w_pad - network.receptive_field_size) // network.step_in_pixels
             expected_n_boxes += dim_this_grid * dim_this_grid
         return expected_n_boxes
 
     def get_input_shape(self):
-        input_shape = [self.opts.input_image_size, self.opts.input_image_size]
+        input_shape = [self.input_image_size, self.input_image_size]
         return input_shape
 
     def compute_anchors_coordinates(self):
@@ -104,7 +104,7 @@ class MultiCellArch:
         inputs_all_sizes = []
         for grid in self.grid_levels:
             size = grid.input_size
-            if size == self.opts.input_image_size:
+            if size == self.input_image_size:
                 inputs_this_grid = inputs
             else:
                 inputs_this_grid = tf.image.resize_images(inputs, [size, size])
@@ -113,23 +113,6 @@ class MultiCellArch:
                 inputs_this_grid = tf.pad(inputs_this_grid, paddings, name='pad_image')
             inputs_all_sizes.append(inputs_this_grid)
         return inputs_all_sizes
-
-    def box_coords_wrt_padded_2_box_coords_wrt_anchor(self, box_coords_wrt_pad, position, convert_to_abs=False):
-        box_xmin_wrt_pad = box_coords_wrt_pad[0]
-        box_ymin_wrt_pad = box_coords_wrt_pad[1]
-        box_width_wrt_pad = box_coords_wrt_pad[2]
-        box_height_wrt_pad = box_coords_wrt_pad[3]
-        anchor_xmin_wrt_pad, anchor_ymin_wrt_pad, anchor_xmax_wrt_pad, anchor_ymax_wrt_pad = self.get_anchor_coords_wrt_padded(position)
-        anchor_width_wrt_pad = anchor_xmax_wrt_pad - anchor_xmin_wrt_pad
-        anchor_height_wrt_pad = anchor_ymax_wrt_pad - anchor_ymin_wrt_pad
-        box_xmin_wrt_anchor = (box_xmin_wrt_pad - anchor_xmin_wrt_pad) / anchor_width_wrt_pad
-        box_ymin_wrt_anchor = (box_ymin_wrt_pad - anchor_ymin_wrt_pad) / anchor_height_wrt_pad
-        box_width_wrt_anchor = box_width_wrt_pad / anchor_width_wrt_pad
-        box_height_wrt_anchor = box_height_wrt_pad / anchor_height_wrt_pad
-        box_coords_wrt_anchor = np.array([box_xmin_wrt_anchor, box_ymin_wrt_anchor, box_width_wrt_anchor, box_height_wrt_anchor], dtype=np.float32)
-        if convert_to_abs:
-            box_coords_wrt_anchor = np.clip(np.round(box_coords_wrt_anchor * network.receptive_field_size).astype(np.int32), 0, network.receptive_field_size - 1)
-        return box_coords_wrt_anchor
 
     def net_on_every_size(self, inputs_all_sizes):
         self.n_boxes = 0
@@ -140,7 +123,7 @@ class MultiCellArch:
             print('')
             print('Defining network for input size ' + str(grid.input_size) + ' (pad: ' + str(grid.pad_abs) + ')')
             common_representation = network.common_representation(inputs_all_sizes[i], self.opts.lcr)
-            net = network.localization_and_classification_path(common_representation, self.opts, self.nclasses)
+            net = network.prediction_path(common_representation, self.opts, self.nclasses, self.opts.predict_pc, self.opts.predict_dc)
             net_shape = net.shape.as_list()
             assert net_shape[1] == net_shape[2], 'Different width and height at network output'
             grid.set_output_shape(net_shape[1], network.receptive_field_size)
@@ -151,14 +134,14 @@ class MultiCellArch:
             self.n_boxes += grid.n_boxes
             all_outputs.append(output_flat)
             all_crs.append(cr_flat)
-            if (grid.input_size_w_pad - network.receptive_field_size) / self.opts.step_in_pixels + 1 != grid.output_shape:
+            if (grid.input_size_w_pad - network.receptive_field_size) / network.step_in_pixels + 1 != grid.output_shape:
                 raise Exception('Inconsistent step for input size ' + str(grid.input_size_w_pad) + '. Grid size is ' + str(grid.output_shape) + '.')
         assert self.n_boxes == self.get_expected_num_boxes(), 'Expected number of boxes differs from the real number.'
         all_outputs = tf.concat(all_outputs, axis=1, name='all_outputs')  # (batch_size, nboxes, 4+nclasses)
         all_crs = tf.concat(all_crs, axis=1, name='all_crs')  # (batch_size, nboxes, lcr)
-        self.input_image_size_w_pad = int(np.ceil(float(self.opts.input_image_size) / (1 - 2 * self.max_pad_rel)))
+        self.input_image_size_w_pad = int(np.ceil(float(self.input_image_size) / (1 - 2 * self.max_pad_rel)))
         self.max_pad_abs = int(np.round(self.max_pad_rel * self.input_image_size_w_pad))
-        self.input_image_size_w_pad = self.opts.input_image_size + 2 * self.max_pad_abs
+        self.input_image_size_w_pad = self.input_image_size + 2 * self.max_pad_abs
         print('')
         print('Maximum relative pad: ' + str(self.max_pad_rel))
         print('Maximum absolute pad: ' + str(self.max_pad_abs))
@@ -200,16 +183,23 @@ class MultiCellArch:
             net_output_shape = net_output.shape
             net_output = tf.py_func(self.write_debug_info, debug_inputs, (tf.float32))
             net_output.set_shape(net_output_shape)
-        localizations, softmax = self.obtain_localizations_and_softmax(net_output)
-        return localizations, softmax, CRs
+        localizations, softmax, pc, dc = self.obtain_localizations_and_softmax(net_output)
+        return localizations, softmax, CRs, pc, dc
 
     def obtain_localizations_and_softmax(self, net_output):
-        # net_output: (batch_size, nboxes, 4+nclasses)
-        localizations_enc = net_output[:, :, :4]  # (batch_size, nboxes, 4)
-        localizations_dec = self.decode_boxes_tf(localizations_enc)  # (batch_size, nboxes, 4)
-        logits = net_output[:, :, 4:]  # (batch_size, nboxes, nclasses)
+        # net_output: (batch_size, nboxes, ?)
+
+        # Split net output:
+        locs_enc = output_encoding.get_loc_enc(net_output)  # (batch_size, nboxes, 4)
+        logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nboxes, nclasses)
+        pc = output_encoding.get_pc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nboxes) or None
+        dc = output_encoding.get_dc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nboxes) or None
+
+        # Decode
+        localizations_dec = self.decode_boxes_wrt_padded_tf(locs_enc)  # (batch_size, nboxes, 4)
         softmax = tf.nn.softmax(logits, axis=-1)  # (batch_size, nboxes, nclasses)
-        return localizations_dec, softmax
+
+        return localizations_dec, softmax, pc, dc
 
 
     def get_grid_idx_from_flat_position(self, position):
@@ -232,8 +222,8 @@ class MultiCellArch:
         grid_idx, row, col = self.get_grid_coordinates_from_flat_position(position)
         grid = self.grid_levels[grid_idx]
         # Relative coordinates:
-        xmin = float(self.opts.step_in_pixels * col) / grid.input_size_w_pad
-        ymin = float(self.opts.step_in_pixels * row) / grid.input_size_w_pad
+        xmin = float(network.step_in_pixels * col) / grid.input_size_w_pad
+        ymin = float(network.step_in_pixels * row) / grid.input_size_w_pad
         # xmin = float(self.opts.step_in_pixels * row) / grid.input_size_w_pad
         # ymin = float(self.opts.step_in_pixels * col) / grid.input_size_w_pad
         xmax = xmin + grid.rel_box_size
@@ -267,214 +257,7 @@ class MultiCellArch:
             ymax = min(int(np.round(ymax * self.input_image_size_w_pad)), self.input_image_size_w_pad)
         return xmin, ymin, xmax, ymax
 
-    def remove_padding_from_gt(self, gt_boxes, clip=True):
-        unpadded_gt_boxes = []
-        for box in gt_boxes:
-            unpadded_gt_boxes.append(box)
-        for box in unpadded_gt_boxes:
-            box.remove_padding(self.max_pad_rel, clip)
-        return unpadded_gt_boxes
-
-    def coords_orig2pad(self, coords_orig):
-        coords_pad = np.zeros(shape=coords_orig.shape, dtype=np.float32)
-        coords_pad[..., :2] = self.max_pad_rel + coords_orig[..., :2] * (1 - 2 * self.max_pad_rel)
-        coords_pad[..., 2:] = coords_orig[..., 2:] * (1 - 2 * self.max_pad_rel)
-        return coords_pad
-
-    def encode_gt(self, gt_boxes):
-        # Inputs:
-        #     gt_boxes: List of GroundTruthBox objects, with relative coordinates (between 0 and 1)
-        # Outputs:
-        #     encoded_labels: numpy array of dimension nboxes x 9, being nboxes the total number of anchor boxes.
-        #                     The second dimension is like follows: First the 4 encoded coordinates of the bounding box,
-        #                     then a flag indicating if it matches a ground truth box or not, another flag inidicating
-        #                     if it is a neutral box, the class id, the ground truth box id associated with, and then
-        #                     the maximum percent contained (or the percent contained of the associated gt box)
-        #
-        # We don't consider the batch dimension here.
-        n_gt = len(gt_boxes)
-
-        if n_gt > 0:
-            gt_vec = np.zeros(shape=(n_gt, 4), dtype=np.float32)
-            gt_class_ids = np.zeros(shape=(n_gt), dtype=np.int32)
-            gt_pc_incoming = np.zeros(shape=(n_gt), dtype=np.float32)
-            for gt_idx in range(n_gt):
-                gt_vec[gt_idx, :] = gt_boxes[gt_idx].get_coords()
-                # Take into account padding:
-                gt_class_ids[gt_idx] = gt_boxes[gt_idx].classid
-                gt_pc_incoming[gt_idx] = gt_boxes[gt_idx].pc
-
-            # Convert bounding boxes coordinates from the original representation, to the representation in the padded image:
-            gt_vec = self.coords_orig2pad(gt_vec)
-
-            pc, ar, dc = self.compute_pc_ar_dc(gt_vec)  # All variables have shape (n_gt, n_boxes)
-
-            gt_pc_incoming_exp = np.expand_dims(gt_pc_incoming, axis=1)  # (n_gt, 1)
-            gt_pc_incoming_exp = np.tile(gt_pc_incoming_exp, [1, self.n_boxes])  # (n_gt, n_boxes)
-            pc = pc * gt_pc_incoming_exp  # (n_gt, n_boxes)
-
-            # Positive boxes:
-            mask_ar = ar > self.opts.threshold_ar  # (n_gt, n_boxes)
-            mask_pc = pc > self.opts.threshold_pc  # (n_gt, n_boxes)
-            mask_dc = dc < self.opts.threshold_dc  # (n_gt, n_boxes)
-            mask_thresholds = mask_ar & mask_pc & mask_dc  # (n_gt, n_boxes)
-            mask_match = np.any(mask_thresholds, axis=0)  # (n_boxes)
-
-            dc_masked = np.where(mask_thresholds, dc, np.infty * np.ones(shape=(n_gt, self.n_boxes), dtype=np.float32) ) # (n_gt, n_boxes)
-
-            nearest_valid_gt_idx = np.argmin(dc_masked, axis=0)  # (n_boxes)
-
-            # Neutral boxes:
-            mask_ar_neutral = ar > self.opts.threshold_ar_neutral  # (n_gt, n_boxes)
-            mask_pc_neutral = pc > self.opts.threshold_pc_neutral  # (n_gt, n_boxes)
-            mask_dc_neutral = dc < self.opts.threshold_dc_neutral  # (n_gt, n_boxes)
-            mask_thresholds_neutral = mask_ar_neutral & mask_pc_neutral & mask_dc_neutral  # (n_gt, n_boxes)
-            mask_neutral = np.any(mask_thresholds_neutral, axis=0)  # (n_boxes)
-            mask_neutral = np.logical_and(mask_neutral, np.logical_not(mask_match))  # (n_boxes)
-
-            # Get the coordinates and the class id of the gt boxes matched:
-            coordinates = np.take(gt_vec, nearest_valid_gt_idx, axis=0)  # (n_boxes, 4)
-            coordinates_enc = self.encode_boxes(coordinates)  # (nboxes, 4)
-            class_ids_pos = np.take(gt_class_ids, nearest_valid_gt_idx, axis=0)  # (n_boxes)
-
-            # Negative boxes:
-            mask_negative = np.logical_and(np.logical_not(mask_match), np.logical_not(mask_neutral))  # (n_boxes)
-            background_ids = np.ones(shape=(self.n_boxes), dtype=np.int32) * self.background_id
-            class_ids = np.where(mask_negative, background_ids, class_ids_pos)  # (n_boxes)
-
-            # Percent contained associated with each anchor box.
-            # This is the PC of the assigned gt box, if there is any, or otherwise the maximum PC it has.
-            pc_associated = np.zeros(shape=(self.n_boxes), dtype=np.float32)
-            for i in range(self.n_boxes):
-                if mask_match[i]:
-                    pc_associated[i] = pc[nearest_valid_gt_idx[i], i]
-                else:
-                    pc_associated[i] = np.max(pc[:, i])
-
-            # Put all together in one array:
-            labels_enc = coordinates_enc  # (nboxes, 4)
-            labels_enc = np.concatenate((labels_enc, np.expand_dims(mask_match.astype(np.float32), axis=1)), axis=1)  # (n_boxes, 5)  pos 4
-            labels_enc = np.concatenate((labels_enc, np.expand_dims(mask_neutral.astype(np.float32), axis=1)), axis=1)  # (n_boxes, 6)  pos 5
-            labels_enc = np.concatenate((labels_enc, np.expand_dims(class_ids.astype(np.float32), axis=1)), axis=1)  # (n_boxes, 7)  pos 6
-            labels_enc = np.concatenate((labels_enc, np.expand_dims(nearest_valid_gt_idx.astype(np.float32), axis=1)), axis=1)  # (n_boxes, 8)  pos 7
-            labels_enc = np.concatenate((labels_enc, np.expand_dims(pc_associated, axis=1)), axis=1)  # (n_boxes, 9)  pos 8
-
-        else:
-            labels_enc = np.zeros(shape=(self.n_boxes, 9), dtype=np.float32)
-            labels_enc[:, 6] = self.background_id
-
-        return labels_enc
-
-    def decode_gt(self, labels_enc, remove_duplicated=True):
-        # Inputs:
-        #     labels_enc: numpy array of dimension (nboxes x 9).
-        #     remove_duplicated: Many default boxes can be assigned to the same ground truth box. Therefore,
-        #                        when decoding, we can find several times the same box. If we set this to True, then
-        #                        the dubplicated boxes are deleted.
-        # Outputs:
-        #     gt_boxes: List of BoundingBox objects, with relative coordinates (between 0 and 1)
-        #
-        # We don't consider the batch dimension here.
-        gt_boxes = []
-
-        coords_enc = labels_enc[:, :4]  # (nboxes, 4)
-        coords_raw = self.decode_boxes(coords_enc)  # (nboxes, 4)
-
-        for anchor_idx in range(self.n_boxes):
-            if labels_enc[anchor_idx, 4] > 0.5:
-                classid = int(np.round(labels_enc[anchor_idx, 6]))
-                # percent_contained = sigmoid(labels_enc[anchor_idx, 8])
-                percent_contained = np.clip(labels_enc[anchor_idx, 8], 0.0, 1.0)
-                gtbox = BoundingBox(coords_raw[anchor_idx, :], classid, percent_contained)
-                # Skip if it is duplicated:
-                if remove_duplicated:
-                    if not self.check_duplicated(gt_boxes, gtbox):
-                        gt_boxes.append(gtbox)
-                else:
-                    gt_boxes.append(gtbox)
-        # Convert boxes coordinates from padded representation to the original one, and clip values to (0, 1):
-        gt_boxes = self.remove_padding_from_gt(gt_boxes, clip=True)
-        return gt_boxes
-
-    def decode_preds(self, net_output_nobatch, th_conf):
-        # Inputs:
-        #     net_output_nobatch: numpy array of dimension nboxes x 9.
-        # Outputs:
-        #     predictions: List of PredictedBox objects, with relative coordinates (between 0 and 1)
-        #
-        # We don't consider the batch dimension here.
-
-        net_output_conf, net_output_coords, net_output_pc = CommonEncoding.split_net_output_np(net_output_nobatch, self.opts, self.nclasses)
-        # net_output_conf: (nboxes, nclasses)
-        # net_output_coords: (nboxes, ?)
-        # net_output_pc: (nboxes, ?)
-        if self.opts.box_per_class:
-            # net_output_coords: (nboxes, 4 * nclasses)
-            selected_coords = CommonEncoding.get_selected_coords_np(net_output_conf, net_output_coords, self.nclasses, self.opts.box_per_class)  # (nboxes, 4)
-            pred_coords_raw = self.decode_boxes(selected_coords)  # (nboxes, 4) [xmin, ymin, width, height]
-        else:
-            # net_output_coords: (nboxes, 4)
-            pred_coords_raw = self.decode_boxes(net_output_coords)  # (nboxes, 4) [xmin, ymin, width, height]
-        class_ids = np.argmax(net_output_conf, axis=1)  # (nboxes)
-        predictions = []
-        for idx in range(self.n_boxes):
-            cls_id = class_ids[idx]
-            if cls_id != self.background_id:
-                gtbox = PredictedBox(pred_coords_raw[idx], cls_id, net_output_conf[idx, cls_id])
-                if self.opts.predict_pc:
-                    if self.opts.box_per_class:
-                        # net_output_pc: (nboxes, nclasses)
-                        gtbox.pc = net_output_pc[idx, cls_id]
-                    else:
-                        # net_output_pc: (nboxes)
-                        gtbox.pc = net_output_pc[idx]
-                predictions.append(gtbox)
-        # Convert boxes coordinates from padded representation to the original one, and clip values to (0, 1):
-        predictions = self.remove_padding_from_gt(predictions, clip=True)
-        return predictions
-
-    def encode_boxes(self, coords_raw):
-        # coords_raw: (nboxes, 4)
-        xmin = coords_raw[:, 0]
-        ymin = coords_raw[:, 1]
-        width = coords_raw[:, 2]
-        height = coords_raw[:, 3]
-
-        xc = xmin + 0.5 * width
-        yc = ymin + 0.5 * height
-
-        dcx = (self.anchors_xc - xc) / (self.anchors_w * 0.5)  # (nboxes)
-        dcy = (self.anchors_yc - yc) / (self.anchors_h * 0.5)  # (nboxes)
-        # Between -1 and 1 for the box to lie inside the anchor.
-
-        w_rel = width / self.anchors_w  # (nboxes)
-        h_rel = height / self.anchors_h  # (nboxes)
-        # Between 0 and 1 for the box to lie inside the anchor.
-
-        # Encoding step:
-        if self.opts.encoding_method == 'basic_1':
-            dcx_enc = np.tan(dcx * (np.pi / 2.0 - self.opts.enc_epsilon))
-            dcy_enc = np.tan(dcy * (np.pi / 2.0 - self.opts.enc_epsilon))
-            w_enc = CommonEncoding.logit((w_rel - self.opts.enc_wh_b) / self.opts.enc_wh_a)
-            h_enc = CommonEncoding.logit((h_rel - self.opts.enc_wh_b) / self.opts.enc_wh_a)
-        elif self.opts.encoding_method == 'ssd':
-            dcx_enc = dcx * 10.0
-            dcy_enc = dcy * 10.0
-            w_enc = np.log(w_rel) * 5.0
-            h_enc = np.log(h_rel) * 5.0
-        elif self.opts.encoding_method == 'no_encode':
-            dcx_enc = dcx
-            dcy_enc = dcy
-            w_enc = w_rel
-            h_enc = h_rel
-        else:
-            raise Exception('Encoding method not recognized.')
-
-        coords_enc = np.stack([dcx_enc, dcy_enc, w_enc, h_enc], axis=1)  # (nboxes, 4)
-
-        return coords_enc  # (nboxes, 4) [dcx_enc, dcy_enc, w_enc, h_enc]
-
-    def decode_boxes_tf(self, coords_enc):
+    def decode_boxes_wrt_padded_tf(self, coords_enc):
         # coords_enc: (..., 4)
         dcx_enc = coords_enc[..., 0]
         dcy_enc = coords_enc[..., 1]
@@ -482,23 +265,7 @@ class MultiCellArch:
         h_enc = coords_enc[..., 3]
 
         # Decoding step:
-        if self.opts.encoding_method == 'basic_1':
-            dcx_rel = tf.clip_by_value(tf.atan(dcx_enc) / (np.pi / 2.0 - self.opts.enc_epsilon), -1.0, 1.0)
-            dcy_rel = tf.clip_by_value(tf.atan(dcy_enc) / (np.pi / 2.0 - self.opts.enc_epsilon), -1.0, 1.0)
-            w_rel = tf.clip_by_value(CommonEncoding.sigmoid(w_enc) * self.opts.enc_wh_a + self.opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)
-            h_rel = tf.clip_by_value(CommonEncoding.sigmoid(h_enc) * self.opts.enc_wh_a + self.opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)
-        elif self.opts.encoding_method == 'ssd':
-            dcx_rel = tf.clip_by_value(dcx_enc * 0.1, -1.0, 1.0)
-            dcy_rel = tf.clip_by_value(dcy_enc * 0.1, -1.0, 1.0)
-            w_rel = tf.clip_by_value(tf.exp(w_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)
-            h_rel = tf.clip_by_value(tf.exp(h_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)
-        elif self.opts.encoding_method == 'no_encode':
-            dcx_rel = tf.clip_by_value(dcx_enc, -1.0, 1.0)
-            dcy_rel = tf.clip_by_value(dcy_enc, -1.0, 1.0)
-            w_rel = tf.clip_by_value(w_enc, 1.0 / network.receptive_field_size, 1.0)
-            h_rel = tf.clip_by_value(h_enc, 1.0 / network.receptive_field_size, 1.0)
-        else:
-            raise Exception('Encoding method not recognized.')
+        dcx_rel, dcy_rel, w_rel, h_rel = CommonEncoding.decoding_split_tf(dcx_enc, dcy_enc, w_enc, h_enc, self.opts)
 
         xc = self.anchors_xc - dcx_rel * (self.anchors_w * 0.5)  # (nboxes)
         yc = self.anchors_yc - dcy_rel * (self.anchors_h * 0.5)  # (nboxes)
@@ -508,133 +275,21 @@ class MultiCellArch:
 
         xmin = xc - 0.5 * width  # (nboxes)
         ymin = yc - 0.5 * height  # (nboxes)
-
 
         # Remove padding:
         xmin = (xmin - self.max_pad_rel) / (1 - 2 * self.max_pad_rel)
         ymin = (ymin - self.max_pad_rel) / (1 - 2 * self.max_pad_rel)
         width = width / (1 - 2 * self.max_pad_rel)
         height = height / (1 - 2 * self.max_pad_rel)
+
         # Clip:
         xmin = tf.clip_by_value(xmin, 0.0, 1.0)
         ymin = tf.clip_by_value(ymin, 0.0, 1.0)
         width = tf.maximum(0.0, tf.minimum(1.0 - xmin, width))
         height = tf.maximum(0.0, tf.minimum(1.0 - ymin, height))
-
-
-
-
         coords_raw = tf.stack([xmin, ymin, width, height], axis=-1)  # (nboxes, 4)
 
         return coords_raw  # (..., 4) [xmin, ymin, width, height]
-
-    def decode_boxes(self, coords_enc):
-        # coords_enc: (..., 4)
-        dcx_enc = coords_enc[..., 0]
-        dcy_enc = coords_enc[..., 1]
-        w_enc = coords_enc[..., 2]
-        h_enc = coords_enc[..., 3]
-
-        # Decoding step:
-        if self.opts.encoding_method == 'basic_1':
-            dcx_rel = np.clip(np.arctan(dcx_enc) / (np.pi / 2.0 - self.opts.enc_epsilon), -1.0, 1.0)
-            dcy_rel = np.clip(np.arctan(dcy_enc) / (np.pi / 2.0 - self.opts.enc_epsilon), -1.0, 1.0)
-            w_rel = np.clip(CommonEncoding.sigmoid(w_enc) * self.opts.enc_wh_a + self.opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)
-            h_rel = np.clip(CommonEncoding.sigmoid(h_enc) * self.opts.enc_wh_a + self.opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)
-        elif self.opts.encoding_method == 'ssd':
-            dcx_rel = np.clip(dcx_enc * 0.1, -1.0, 1.0)
-            dcy_rel = np.clip(dcy_enc * 0.1, -1.0, 1.0)
-            w_rel = np.clip(np.exp(w_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)
-            h_rel = np.clip(np.exp(h_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)
-        elif self.opts.encoding_method == 'no_encode':
-            dcx_rel = np.clip(dcx_enc, -1.0, 1.0)
-            dcy_rel = np.clip(dcy_enc, -1.0, 1.0)
-            w_rel = np.clip(w_enc, 1.0 / network.receptive_field_size, 1.0)
-            h_rel = np.clip(h_enc, 1.0 / network.receptive_field_size, 1.0)
-        else:
-            raise Exception('Encoding method not recognized.')
-
-        xc = self.anchors_xc - dcx_rel * (self.anchors_w * 0.5)  # (nboxes)
-        yc = self.anchors_yc - dcy_rel * (self.anchors_h * 0.5)  # (nboxes)
-
-        width = self.anchors_w * w_rel  # (nboxes)
-        height = self.anchors_h * h_rel  # (nboxes)
-
-        xmin = xc - 0.5 * width  # (nboxes)
-        ymin = yc - 0.5 * height  # (nboxes)
-
-        # # # Ensure we don't have a degenerate box:
-        # xmin = np.minimum(np.maximum(xmin, 0), anchors_w - 2)
-        # ymin = np.minimum(np.maximum(ymin, 0), anchors_h - 2)
-        # width = np.minimum(np.maximum(width, 1), anchors_w - xmin - 1)
-        # height = np.minimum(np.maximum(height, 1), anchors_h - ymin - 1)
-
-        coords_raw = np.stack([xmin, ymin, width, height], axis=-1)  # (nboxes, 4)
-
-        return coords_raw  # (..., 4) [xmin, ymin, width, height]
-
-    def decode_boxes_w_batch_size(self, coords_enc):
-        # coords_enc: (batch_size, nboxes, 4)
-        dcx_enc = coords_enc[:, :, 0]  # (batch_size, nboxes)
-        dcy_enc = coords_enc[:, :, 1]  # (batch_size, nboxes)
-        w_enc = coords_enc[:, :, 2]  # (batch_size, nboxes)
-        h_enc = coords_enc[:, :, 3]  # (batch_size, nboxes)
-
-        # Decoding step:
-        if self.opts.encoding_method == 'basic_1':
-            dcx_rel = np.clip(np.arctan(dcx_enc) / (np.pi / 2.0 - self.opts.enc_epsilon), -1.0, 1.0)  # (batch_size, nboxes)
-            dcy_rel = np.clip(np.arctan(dcy_enc) / (np.pi / 2.0 - self.opts.enc_epsilon), -1.0, 1.0)  # (batch_size, nboxes)
-            w_rel = np.clip(CommonEncoding.sigmoid(w_enc) * self.opts.enc_wh_a + self.opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)  # (batch_size, nboxes)
-            h_rel = np.clip(CommonEncoding.sigmoid(h_enc) * self.opts.enc_wh_a + self.opts.enc_wh_b, 1.0 / network.receptive_field_size, 1.0)  # (batch_size, nboxes)
-        elif self.opts.encoding_method == 'ssd':
-            dcx_rel = np.clip(dcx_enc * 0.1, -1.0, 1.0)  # (batch_size, nboxes)
-            dcy_rel = np.clip(dcy_enc * 0.1, -1.0, 1.0)  # (batch_size, nboxes)
-            w_rel = np.clip(np.exp(w_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)  # (batch_size, nboxes)
-            h_rel = np.clip(np.exp(h_enc * 0.2), 1.0 / network.receptive_field_size, 1.0)  # (batch_size, nboxes)
-        elif self.opts.encoding_method == 'no_encode':
-            dcx_rel = np.clip(dcx_enc, -1.0, 1.0)
-            dcy_rel = np.clip(dcy_enc, -1.0, 1.0)
-            w_rel = np.clip(w_enc, 1.0 / network.receptive_field_size, 1.0)
-            h_rel = np.clip(h_enc, 1.0 / network.receptive_field_size, 1.0)
-        else:
-            raise Exception('Encoding method not recognized.')
-
-        # self.anchors_coordinates (nboxes, 4) [xmin, ymin, xmax, ymax]
-        anchors_coords_exp = np.expand_dims(self.anchors_coordinates, axis=0)  # (1, nboxes, 4)
-        batch_size = coords_enc.shape[0]
-        anchors_coords_exp = np.tile(anchors_coords_exp, [batch_size, 1, 1])  # (batch_size, nboxes, 4)
-        anchors_xc_exp = (anchors_coords_exp[:, :, 0] + anchors_coords_exp[:, :, 2]) / 2.0  # (batch_size, nboxes)
-        anchors_yc_exp = (anchors_coords_exp[:, :, 1] + anchors_coords_exp[:, :, 3]) / 2.0  # (batch_size, nboxes)
-        anchors_w_exp = anchors_coords_exp[:, :, 2] - anchors_coords_exp[:, :, 0]  # (batch_size, nboxes)
-        anchors_h_exp = anchors_coords_exp[:, :, 3] - anchors_coords_exp[:, :, 1]  # (batch_size, nboxes)
-
-        xc = anchors_xc_exp - dcx_rel * (anchors_w_exp * 0.5)  # (batch_size, nboxes)
-        yc = anchors_yc_exp - dcy_rel * (anchors_h_exp * 0.5)  # (batch_size, nboxes)
-
-        width = anchors_w_exp * w_rel  # (batch_size, nboxes)
-        height = anchors_h_exp * h_rel  # (batch_size, nboxes)
-
-        xmin = xc - 0.5 * width  # (batch_size, nboxes)
-        ymin = yc - 0.5 * height  # (batch_size, nboxes)
-
-        # # # Ensure we don't have a degenerate box:
-        # xmin = np.minimum(np.maximum(xmin, 0), anchors_w - 2)
-        # ymin = np.minimum(np.maximum(ymin, 0), anchors_h - 2)
-        # width = np.minimum(np.maximum(width, 1), anchors_w - xmin - 1)
-        # height = np.minimum(np.maximum(height, 1), anchors_h - ymin - 1)
-
-        coords_raw = np.stack([xmin, ymin, width, height], axis=-1)  # (batch_size, nboxes, 4)
-
-        return coords_raw  # (batch_size, nboxes, 4) [xmin, ymin, width, height]
-
-    def check_duplicated(self, all_boxes, new_box, tolerance=1e-6):
-        for old_box in all_boxes:
-            if old_box.classid == new_box.classid:
-                old_coords = np.array(old_box.get_coords())
-                new_coords = np.array(new_box.get_coords())
-                if np.sum(np.square(old_coords - new_coords)) < tolerance:
-                    return True
-        return False
 
     # Compute the 'Percent Contained', the 'Area Ratio' and the 'Distance to Center' between ground truth boxes and and anchor boxes.
     def compute_pc_ar_dc(self, gt_boxes):
@@ -733,7 +388,7 @@ class MultiCellArch:
                 img = tools.add_mean_again(img)
                 path_to_save = os.path.join(batch_dir, 'img' + str(img_idx) + '_pos' + str(pos) + '.png')
                 coords_enc = localizations_enc[img_idx, pos, :]  # (4)
-                coords_dec = CommonEncoding.decode_boxes_np(coords_enc, self.opts)  # (4)
+                coords_dec = CommonEncoding.decode_boxes_wrt_anchor_np(coords_enc, self.opts)  # (4)
                 if self.th_conf is None:
                     predicted_class = np.argmax(softmax[img_idx, pos, :])
                     if predicted_class != self.background_id:

@@ -85,7 +85,7 @@ class MultiCellEnv:
         self.nclasses = len(self.classnames)
         self.multi_cell_arch = MultiCellArch.MultiCellArch(self.opts.multi_cell_opts, self.nclasses, self.opts.outdir, self.opts.th_conf, self.classnames)
         self.define_inputs_and_labels()
-        self.localizations, self.softmax, self.common_representations = self.multi_cell_arch.make(self.inputs)
+        self.localizations, self.softmax, self.common_representations, pc, dc = self.multi_cell_arch.make(self.inputs)
         self.restore_fn = tf.contrib.framework.assign_from_checkpoint_fn(self.opts.weights_file, tf.global_variables())
 
     def define_inputs_and_labels(self):
@@ -160,64 +160,6 @@ class MultiCellEnv:
         remaining_boxes = [x for x in boxes if x.confidence != -np.inf]
 
         return remaining_boxes, n_comparisons
-
-    # def remove_repeated_predictions(self, softmax, CRs, sess):
-    #     # TODO: Non me acaba de convencer como esta feita esta funcion...
-    #     # softmax: (batch_size, nboxes, nclasses) [conf1, ..., confN]
-    #     # CRs: (batch_size, nboxes, lcr)
-    #
-    #     initime = time.time()
-    #     logging.debug('Removing repeated predictions...')
-    #
-    #     pred_class = np.argmax(softmax, axis=-1)  # (batch_size, nboxes)
-    #     max_conf = np.max(softmax, axis=-1)  # (batch_size, nboxes)
-    #     mask_detections = np.logical_not(np.equal(pred_class, self.multi_cell_arch.background_id))
-    #
-    #     batch_size = softmax.shape[0]
-    #     boxes_indices = np.arange(self.multi_cell_arch.n_boxes)
-    #     n_comparisons = 0
-    #     for img_idx in range(batch_size):
-    #         img_max_conf = max_conf[img_idx, :]  # (nboxes)
-    #         img_mask = mask_detections[img_idx, :]  # (nboxes)
-    #         conf_detections = np.extract(img_mask, img_max_conf)  # (ndetections)
-    #         detections_indices = np.extract(img_mask, boxes_indices)  # (ndetections)
-    #         sorting_indices = np.argsort(conf_detections)  # (ndetections)
-    #         conf_detections = conf_detections[sorting_indices]  # (ndetections)
-    #         if conf_detections[0] < conf_detections[1]:
-    #             print('conf_detections[0] = ' + str(conf_detections[0]))
-    #             print('conf_detections[1] = ' + str(conf_detections[1]))
-    #             raise Exception('Sorted in reverse order.')
-    #         detections_indices = detections_indices[sorting_indices]  # (ndetections)
-    #         n_detections = conf_detections.shape[0]
-    #         for i in range(n_detections-1):
-    #             for j in range(i+1, n_detections):
-    #                 idx1 = detections_indices[i]
-    #                 idx2 = detections_indices[j]
-    #                 class1 = pred_class[img_idx, idx1]
-    #                 class2 = pred_class[img_idx, idx2]
-    #                 if class1 == class2:
-    #                     CR1 = CRs[img_idx, idx1, :]  # (lcr)
-    #                     CR2 = CRs[img_idx, idx2, :]  # (lcr)
-    #                     conf1 = conf_detections[i]
-    #                     conf2 = conf_detections[j]
-    #                     if conf1 < conf2:
-    #                         print('idx1 = ' + str(idx1))
-    #                         print('idx2 = ' + str(idx2))
-    #                         print('conf1 = ' + str(conf1))
-    #                         print('conf2 = ' + str(conf2))
-    #                         raise Exception('conf1 < conf2 when removing repeated predictions')
-    #                     comparison_2_values = sess.run([self.multi_cell_arch.comparison_op],
-    #                                                    feed_dict={self.multi_cell_arch.CR1: CR1,
-    #                                                               self.multi_cell_arch.CR2: CR2})
-    #                     comparison = comparison_2_values[0]
-    #                     n_comparisons += 1
-    #                     if comparison < self.opts.comp_th:
-    #                         softmax[img_idx, idx2, :-1] = 0
-    #                         softmax[img_idx, idx2, -1] = 1
-    #
-    #     fintime = time.time()
-    #     logging.info('Repeated predictions removed in %.2f s (%d comparisons).' % (fintime - initime, n_comparisons))
-    #     return softmax
 
     def postprocess_gt_and_preds(self, bboxes, localizations, softmax):
         # bboxes: List of length batch_size, with elements (n_gt, 7) [class_id, x_min, y_min, width, height, pc, gt_idx]
@@ -320,8 +262,7 @@ def draw_result(img, pred_boxes, gt_boxes, classnames):
             color = (255, 255, 0)
         # Draw box:
         cv2.rectangle(img, (xmin, ymin), (xmin + w, ymin + h), color, 2)
-        cv2.rectangle(img, (xmin, ymin - 20),
-                      (xmin + w, ymin), (125, 125, 125), -1)
+        cv2.rectangle(img, (xmin, ymin - 20), (xmin + w, ymin), (125, 125, 125), -1)
         cv2.putText(img, classnames[classid] + ' : %.2f' % conf, (xmin + 5, ymin - 7),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
     return

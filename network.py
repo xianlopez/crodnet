@@ -69,12 +69,17 @@ def common_representation(inputs, lcr):
     return net
 
 
-def localization_and_classification_path(net, opts, nclasses):
+def prediction_path(net, opts, nclasses, predict_pc, predict_dc):
+    n_channles_last = 4 + nclasses
+    if predict_pc:
+        n_channles_last += 1
+    if predict_dc:
+        n_channles_last += 1
     with tf.variable_scope('vgg_16'):
-        with tf.variable_scope('loc_and_classif'):
+        with tf.variable_scope('prediction'):
             with slim.arg_scope([slim.conv2d], reuse=tf.AUTO_REUSE, weights_initializer=tf.initializers.he_normal()):
                 net = slim.conv2d(net, opts.lcr, [1, 1], scope='layer1')
-                net = slim.conv2d(net, 4+nclasses, [1, 1], activation_fn=None, scope='layer2')
+                net = slim.conv2d(net, n_channles_last, [1, 1], activation_fn=None, scope='layer2')
     return net
 
 
