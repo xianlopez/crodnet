@@ -386,6 +386,17 @@ def get_trainable_variables(args):
     return vars_to_train
 
 
+def softmax_np(x):
+    # x: (..., nclasses)
+    nclasses = x.shape[-1]
+    e_x = np.exp(x - np.max(x))  # (..., nclasses)
+    repetitions = np.concatenate([np.ones(shape=(len(x.shape) - 1), dtype=np.int32),
+                                  nclasses * np.ones(shape=(1), dtype=np.int32)], axis=0)
+    denominator = np.tile(np.sum(e_x, axis=-1, keepdims=True), repetitions)  # (..., nclasses)
+    softmax = e_x / denominator  # (..., nclasses)
+    return softmax
+
+
 
 
 

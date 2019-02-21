@@ -150,11 +150,17 @@ def decode_dc_tf(dc_enc):
 
 
 def decode_pc_np(pc_enc):
-    return decode_pc_or_dc_np(pc_enc)
+    if pc_enc is None:
+        return None
+    else:
+        return decode_pc_or_dc_np(pc_enc)
 
 
 def decode_dc_np(dc_enc):
-    return decode_pc_or_dc_np(dc_enc)
+    if dc_enc is None:
+        return None
+    else:
+        return decode_pc_or_dc_np(dc_enc)
 
 
 def decode_pc_or_dc_tf(x_enc):
@@ -164,9 +170,12 @@ def decode_pc_or_dc_tf(x_enc):
 
 
 def decode_pc_or_dc_np(x_enc):
-    # x_enc: any shape
-    x_dec = np.clip(x_enc * 0.1, 0.0, 1.0)
-    return x_dec
+    if x_enc is None:
+        return None
+    else:
+        # x_enc: any shape
+        x_dec = np.clip(x_enc * 0.1, 0.0, 1.0)
+        return x_dec
 
 
 def encode_pc_or_dc_np(x_dec):
@@ -181,8 +190,11 @@ def encode_cm_np(cm_dec):
 
 
 def decode_cm_np(cm_enc):
-    cm_dec = cm_enc * 0.1
-    return cm_dec
+    if cm_enc is None:
+        return None
+    else:
+        cm_dec = cm_enc * 0.1
+        return cm_dec
 
 
 def decode_cm_tf(cm_enc):

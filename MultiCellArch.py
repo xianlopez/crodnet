@@ -376,10 +376,7 @@ class MultiCellArch:
         batch_size = net_output.shape[0]
         localizations_enc = output_encoding.get_loc_enc(net_output)  # (batch_size, nboxes, 4)
         logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nboxes, nclasses)
-        e_x = np.exp(logits - np.max(logits))  # (batch_size, nboxes, nclasses)
-        denominator = np.tile(np.sum(e_x, axis=-1, keepdims=True), [1, 1, self.nclasses])  # (batch_size, nboxes, nclasses)
-        softmax = e_x / denominator  # (batch_size, nboxes, nclasses)
-        # softmax = tf.nn.softmax(logits, axis=-1)  # (batch_size, nboxes, nclasses)
+        softmax = tools.softmax_np(logits)  # (batch_size, nboxes, nclasses)
         self.batch_count_debug += 1
         batch_dir = os.path.join(self.debug_dir, 'batch' + str(self.batch_count_debug))
         os.makedirs(batch_dir)

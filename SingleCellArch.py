@@ -221,8 +221,8 @@ class SingleCellArch:
             mask_ar_high = ar < self.opts.threshold_ar_high  # (n_gt)
             mask_pc = pc > self.opts.threshold_pc  # (n_gt)
             mask_dc = dc < self.opts.threshold_dc  # (n_gt)
-            mask_thresholds = mask_ar_low & mask_ar_high & mask_pc & mask_dc  # (n_gt)
-            n_matches = np.sum(mask_thresholds.astype(np.int32))  # ()
+            mask_ar = mask_ar_low & mask_ar_high
+            mask_thresholds = mask_ar & mask_pc & mask_dc  # (n_gt)
             any_match = np.any(mask_thresholds)  # ()
 
             # Neutral boxes:
@@ -240,19 +240,10 @@ class SingleCellArch:
             else:
                 dc_masked = np.where(mask_thresholds_neutral, dc, np.infty * np.ones(shape=(n_gt), dtype=np.float32) ) # (n_gt)
 
-            indices_sort = np.argsort(dc_masked)
-            dc_masked = dc_masked[indices_sort]
-
-            nearest_valid_box_idx = indices_sort[0]  # ()
-
-            # Centrality measure:
-            if any_match:
-                if n_matches > 1:
-                    cm = 1 - (dc_masked[1] - dc_masked[0]) / np.sqrt(2)
-                else:
-                    cm = 1
-            else:
-                cm = 0
+            # indices_sort = np.argsort(dc_masked)
+            # dc_masked = dc_masked[indices_sort]
+            # nearest_valid_box_idx = indices_sort[0]  # ()
+            nearest_valid_box_idx = np.argmin(dc_masked)  # ()
 
             # Get the coordinates and the class id of the gt box matched:
             if is_negative:
@@ -272,6 +263,40 @@ class SingleCellArch:
                 dc_associated = dc[nearest_valid_box_idx]
                 # Take the original GT index:
                 associated_gt_idx = gt_boxes[nearest_valid_box_idx, 6]  # ()
+
+            # Centrality measure:
+            if self.opts.cm_same_class:
+                mask_class = np.less(np.abs(gt_class_ids - class_id), 0.5)  # (n_gt)
+                mask_ar_and_class = np.logical_and(mask_ar, mask_class)
+                n_fitting = np.sum(mask_ar_and_class.astype(np.int32))  # ()
+                if n_fitting > 1:
+                    dc_masked_by_ar_and_class = \
+                        np.where(mask_ar_and_class, dc, np.infty * np.ones(shape=(n_gt), dtype=np.float32) ) # (n_gt)
+                    dc_masked_by_ar_and_class.sort()
+                    if dc_masked_by_ar_and_class[0] < 0 or dc_masked_by_ar_and_class[0] > np.sqrt(2):
+                        raise Exception('dc_masked_by_ar_and_class[0] = ' + str(dc_masked_by_ar_and_class[0]))
+                    if dc_masked_by_ar_and_class[1] < 0 or dc_masked_by_ar_and_class[1] > np.sqrt(2):
+                        raise Exception('dc_masked_by_ar_and_class[1] = ' + str(dc_masked_by_ar_and_class[1]))
+                    cm = (dc_masked_by_ar_and_class[1] - dc_masked_by_ar_and_class[0]) / np.sqrt(2)
+                else:
+                    cm = 1
+            else:
+                dc_masked_by_ar = np.where(mask_ar, dc, np.infty * np.ones(shape=(n_gt), dtype=np.float32) ) # (n_gt)
+                # indices_sort = np.argsort(dc_masked_by_ar)
+                # dc_masked_by_ar = dc_masked_by_ar[indices_sort]
+                dc_masked_by_ar.sort()
+                n_fitting_ar = np.sum(mask_ar.astype(np.int32))  # ()
+                if n_fitting_ar > 1:
+                    if dc_masked_by_ar[0] < 0 or dc_masked_by_ar[0] > np.sqrt(2):
+                        raise Exception('dc_masked_by_ar[0] = ' + str(dc_masked_by_ar[0]))
+                    if dc_masked_by_ar[1] < 0 or dc_masked_by_ar[1] > np.sqrt(2):
+                        raise Exception('dc_masked_by_ar[1] = ' + str(dc_masked_by_ar[1]))
+                    cm = (dc_masked_by_ar[1] - dc_masked_by_ar[0]) / np.sqrt(2)
+                else:
+                    cm = 1
+
+            if cm < 0 or cm > 1:
+                raise Exception('cm = ' + str(cm))
 
             pc_enc = CommonEncoding.encode_pc_or_dc_np(pc_associated)
             dc_enc = CommonEncoding.encode_pc_or_dc_np(dc_associated)
@@ -293,6 +318,32 @@ class SingleCellArch:
 
         return labels_enc  # (n_labels)
 
+    def write_crop_info_file(self, info_file_path, softmax, pred_class, gt_class, is_match, is_neutral,
+                             pc_gt, dc_gt, cm_gt, pc_pred, dc_pred, cm_pred, idx):
+        # softmax: (nclasses)
+        with open(info_file_path, 'w') as fid:
+            fid.write('softmax =')
+            for j in range(self.nclasses):
+                if j != 0:
+                    fid.write(',')
+                fid.write(' ' + str(softmax[idx, j]))
+            fid.write('\n')
+            fid.write('predicted_class = ' + str(pred_class) + ' (' + self.classnames[pred_class] + ')\n')
+            fid.write('gt_class = ' + str(gt_class) + ' (' + self.classnames[gt_class] + ')\n')
+            fid.write('is_match = ' + str(is_match) + '\n')
+            fid.write('is_neutral = ' + str(is_neutral) + '\n')
+            if self.opts.predict_pc:
+                fid.write('pc_gt = ' + str(pc_gt[idx]) + '\n')
+                fid.write('pc_pred = ' + str(pc_pred[idx]) + '\n')
+            if self.opts.predict_dc:
+                fid.write('dc_gt = ' + str(dc_gt[idx]) + '\n')
+                fid.write('dc_pred = ' + str(dc_pred[idx]) + '\n')
+            if self.opts.predict_cm:
+                if cm_gt[idx] < 0 or cm_gt[idx] > 1:
+                    print('writing debug. cm_gt = ' + str(cm_gt[idx]))
+                fid.write('cm_gt = ' + str(cm_gt[idx]) + '\n')
+                fid.write('cm_pred = ' + str(cm_pred[idx]) + '\n')
+
     def write_train_debug_info(self, metrics, inputs_reord, labels_enc_reord, net_output, comparisons_pred, comps_validity_labels, comparisons_indices, filenames):
         # inputs_reord: (batch_size, input_image_size, input_image_size, 3)
         # labels_enc_reord: (batch_size, n_labels)
@@ -305,8 +356,22 @@ class SingleCellArch:
         # Split net output:
         locs_enc = output_encoding.get_loc_enc(net_output)  # (batch_size, 4)
         logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size, nclasses)
-        pc_enc = output_encoding.get_pc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size) or None
-        dc_enc = output_encoding.get_dc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size) or None
+        pc_pred_enc = output_encoding.get_pc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size) or None
+        dc_pred_enc = output_encoding.get_dc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size) or None
+        cm_pred_enc = output_encoding.get_cm_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size) or None
+
+        pc_gt_enc = gt_encoding.get_pc_enc(labels_enc_reord)  # (batch_size)
+        dc_gt_enc = gt_encoding.get_dc_enc(labels_enc_reord)  # (batch_size)
+        cm_gt_enc = gt_encoding.get_cm_enc(labels_enc_reord)  # (batch_size)
+
+        softmax = tools.softmax_np(logits)  # (batch_size, nclasses)
+        pc_pred = CommonEncoding.decode_pc_np(pc_pred_enc)
+        dc_pred = CommonEncoding.decode_dc_np(dc_pred_enc)
+        cm_pred = CommonEncoding.decode_cm_np(cm_pred_enc)
+
+        pc_gt = CommonEncoding.decode_pc_np(pc_gt_enc)
+        dc_gt = CommonEncoding.decode_dc_np(dc_gt_enc)
+        cm_gt = CommonEncoding.decode_cm_np(cm_gt_enc)
 
         if self.classnames is None:
             raise Exception('classnames must be specified if debugging.')
@@ -335,19 +400,23 @@ class SingleCellArch:
                 else:
                     crop_path = os.path.join(batch_dir, name + '_crop' + str(i) + '_GT-' + self.classnames[gt_class] +
                                              '_PRED-' + self.classnames[predicted_class] + '.png')
-                    if gt_class != self.background_id:
-                        class_and_coords = np.concatenate([np.expand_dims(gt_class, axis=0), gt_coords_dec], axis=0)  # (5)
-                        class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
-                        crop = tools.add_bounding_boxes_to_image(crop, class_and_coords, color=(255, 0, 0))
-                    else:
-                        assert not is_match, 'is_match is True, and gt_class it background_id.'
-                    predicted_coords_enc = locs_enc[i, :]
-                    predicted_coords_dec = CommonEncoding.decode_boxes_wrt_anchor_np(predicted_coords_enc, self.opts)
-                    if predicted_class != self.background_id:
-                        class_and_coords = np.concatenate([np.expand_dims(predicted_class, axis=0), predicted_coords_dec], axis=0)  # (5)
-                        class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
-                        crop = tools.add_bounding_boxes_to_image(crop, class_and_coords, color=(127, 0, 127))
+                if gt_class != self.background_id:
+                    class_and_coords = np.concatenate([np.expand_dims(gt_class, axis=0), gt_coords_dec], axis=0)  # (5)
+                    class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
+                    crop = tools.add_bounding_boxes_to_image(crop, class_and_coords, color=(255, 0, 0))
+                else:
+                    assert not is_match, 'is_match is True, and gt_class it background_id.'
+                predicted_coords_enc = locs_enc[i, :]
+                predicted_coords_dec = CommonEncoding.decode_boxes_wrt_anchor_np(predicted_coords_enc, self.opts)
+                if predicted_class != self.background_id:
+                    class_and_coords = np.concatenate([np.expand_dims(predicted_class, axis=0), predicted_coords_dec], axis=0)  # (5)
+                    class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
+                    crop = tools.add_bounding_boxes_to_image(crop, class_and_coords, color=(127, 0, 127))
                 cv2.imwrite(crop_path, cv2.cvtColor(crop.astype(np.uint8), cv2.COLOR_RGB2BGR))
+                # Save info file:
+                info_file_path = os.path.join(batch_dir, name + '_crop' + str(i) + '_info.txt')
+                self.write_crop_info_file(info_file_path, softmax, predicted_class, gt_class, is_match, is_neutral,
+                                          pc_gt, dc_gt, cm_gt, pc_pred, dc_pred, cm_pred, i)
 
             except:
                 print('Error with image ' + name)
@@ -420,19 +489,20 @@ class SingleCellArch:
                 raise
 
         total_valid_comparisons = n_same + n_diff
-        proportion_valid_this_batch = float(total_valid_comparisons) / total_comparisons
-        if total_valid_comparisons > 0:
-            proportion_same_this_batch = float(n_same) / total_valid_comparisons
-        else:
-            proportion_same_this_batch = 0
-        self.proportion_valid_comparisons = (self.proportion_valid_comparisons * (self.batch_count_train_debug - 1) +
-                                             proportion_valid_this_batch) / float(self.batch_count_train_debug)
-        self.proportion_same_comparisons = (self.proportion_same_comparisons * (self.batch_count_train_debug - 1) +
-                                            proportion_same_this_batch) / float(self.batch_count_train_debug)
-        print('Percent of valid comparisons. This batch: {:3.2f}. Acummulated: {:3.2f}'.format(proportion_valid_this_batch * 100.0,
-                                                                                               self.proportion_valid_comparisons * 100.0))
-        print('Percent of same comparisons. This batch: {:3.2f}. Acummulated: {:3.2f}'.format(proportion_same_this_batch * 100.0,
-                                                                                               self.proportion_same_comparisons * 100.0))
+        if total_comparisons > 0:
+            proportion_valid_this_batch = float(total_valid_comparisons) / total_comparisons
+            if total_valid_comparisons > 0:
+                proportion_same_this_batch = float(n_same) / total_valid_comparisons
+            else:
+                proportion_same_this_batch = 0
+            self.proportion_valid_comparisons = (self.proportion_valid_comparisons * (self.batch_count_train_debug - 1) +
+                                                 proportion_valid_this_batch) / float(self.batch_count_train_debug)
+            self.proportion_same_comparisons = (self.proportion_same_comparisons * (self.batch_count_train_debug - 1) +
+                                                proportion_same_this_batch) / float(self.batch_count_train_debug)
+            print('Percent of valid comparisons. This batch: {:3.2f}. Acummulated: {:3.2f}'.format(proportion_valid_this_batch * 100.0,
+                                                                                                   self.proportion_valid_comparisons * 100.0))
+            print('Percent of same comparisons. This batch: {:3.2f}. Acummulated: {:3.2f}'.format(proportion_same_this_batch * 100.0,
+                                                                                                   self.proportion_same_comparisons * 100.0))
 
         return metrics
 
@@ -440,9 +510,11 @@ class SingleCellArch:
         self.localizations_dir = os.path.join(self.outdir, 'localizations')
         self.correct_class_dir = os.path.join(self.localizations_dir, 'correct')
         self.wrong_class_dir = os.path.join(self.localizations_dir, 'wrong')
+        self.neutral_dir = os.path.join(self.localizations_dir, 'neutral')
         os.makedirs(self.localizations_dir)
         os.makedirs(self.correct_class_dir)
         os.makedirs(self.wrong_class_dir)
+        os.makedirs(self.neutral_dir)
         self.comparisons_dir = os.path.join(self.outdir, 'comparisons')
         self.comparison_same = os.path.join(self.comparisons_dir, 'gt_same')
         self.comparison_diff = os.path.join(self.comparisons_dir, 'gt_diff')
@@ -470,8 +542,22 @@ class SingleCellArch:
         # Split net output:
         locs_enc = output_encoding.get_loc_enc(net_output)  # (batch_size, 4)
         logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size, nclasses)
-        pc_enc = output_encoding.get_pc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size) or None
-        dc_enc = output_encoding.get_dc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size) or None
+        pc_pred_enc = output_encoding.get_pc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size) or None
+        dc_pred_enc = output_encoding.get_dc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size) or None
+        cm_pred_enc = output_encoding.get_cm_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size) or None
+
+        pc_gt_enc = gt_encoding.get_pc_enc(labels_enc_reord)  # (batch_size)
+        dc_gt_enc = gt_encoding.get_dc_enc(labels_enc_reord)  # (batch_size)
+        cm_gt_enc = gt_encoding.get_cm_enc(labels_enc_reord)  # (batch_size)
+
+        softmax = tools.softmax_np(logits)  # (batch_size, nclasses)
+        pc_pred = CommonEncoding.decode_pc_np(pc_pred_enc)
+        dc_pred = CommonEncoding.decode_dc_np(dc_pred_enc)
+        cm_pred = CommonEncoding.decode_cm_np(cm_pred_enc)
+
+        pc_gt = CommonEncoding.decode_pc_np(pc_gt_enc)
+        dc_gt = CommonEncoding.decode_dc_np(dc_gt_enc)
+        cm_gt = CommonEncoding.decode_cm_np(cm_gt_enc)
 
         if self.classnames is None:
             raise Exception('classnames must be specified if debugging.')
@@ -493,29 +579,38 @@ class SingleCellArch:
                 is_match = mask_match[i]
                 is_neutral = mask_neutral[i]
                 predicted_class = np.argmax(logits[i, :])
-                if not is_neutral:
+                if is_neutral:
+                    file_name = 'batch' + str(self.batch_count_eval_debug) + '_' + name + '_crop' + str(i) + '_NEUTRAL_PRED-' + \
+                                self.classnames[predicted_class] + '.png'
+                    crop_dir = self.neutral_dir
+                else:
                     file_name = 'batch' + str(self.batch_count_eval_debug) + '_' + name + '_crop' + str(i) + '_GT-' + \
                                 self.classnames[gt_class] + '_PRED-' + self.classnames[predicted_class] + '.png'
                     if gt_class == predicted_class:
-                        crop_path = os.path.join(self.correct_class_dir, file_name)
+                        crop_dir = self.correct_class_dir
                     else:
-                        crop_path = os.path.join(self.wrong_class_dir, file_name)
+                        crop_dir = self.wrong_class_dir
+                crop_path = os.path.join(crop_dir, file_name)
 
-                    if gt_class != self.background_id:
-                        gt_coords_enc = gt_encoding.get_coords_enc(label_enc)
-                        gt_coords_dec = CommonEncoding.decode_boxes_wrt_anchor_np(gt_coords_enc, self.opts)
-                        class_and_coords = np.concatenate([np.expand_dims(gt_class, axis=0), gt_coords_dec], axis=0)  # (5)
-                        class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
-                        crop = tools.add_bounding_boxes_to_image(crop, class_and_coords, color=(255, 0, 0))
-                    else:
-                        assert not is_match, 'is_match is True, and gt_class it background_id.'
-                    if predicted_class != self.background_id:
-                        predicted_coords_enc = locs_enc[i, :]
-                        predicted_coords_dec = CommonEncoding.decode_boxes_wrt_anchor_np(predicted_coords_enc, self.opts)
-                        class_and_coords = np.concatenate([np.expand_dims(predicted_class, axis=0), predicted_coords_dec], axis=0)  # (5)
-                        class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
-                        crop = tools.add_bounding_boxes_to_image(crop, class_and_coords, color=(127, 0, 127))
-                    cv2.imwrite(crop_path, cv2.cvtColor(crop.astype(np.uint8), cv2.COLOR_RGB2BGR))
+                if gt_class != self.background_id:
+                    gt_coords_enc = gt_encoding.get_coords_enc(label_enc)
+                    gt_coords_dec = CommonEncoding.decode_boxes_wrt_anchor_np(gt_coords_enc, self.opts)
+                    class_and_coords = np.concatenate([np.expand_dims(gt_class, axis=0), gt_coords_dec], axis=0)  # (5)
+                    class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
+                    crop = tools.add_bounding_boxes_to_image(crop, class_and_coords, color=(255, 0, 0))
+                else:
+                    assert not is_match, 'is_match is True, and gt_class it background_id.'
+                if predicted_class != self.background_id:
+                    predicted_coords_enc = locs_enc[i, :]
+                    predicted_coords_dec = CommonEncoding.decode_boxes_wrt_anchor_np(predicted_coords_enc, self.opts)
+                    class_and_coords = np.concatenate([np.expand_dims(predicted_class, axis=0), predicted_coords_dec], axis=0)  # (5)
+                    class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
+                    crop = tools.add_bounding_boxes_to_image(crop, class_and_coords, color=(127, 0, 127))
+                cv2.imwrite(crop_path, cv2.cvtColor(crop.astype(np.uint8), cv2.COLOR_RGB2BGR))
+                # Save info file:
+                info_file_path = os.path.join(crop_dir, 'batch' + str(self.batch_count_eval_debug) + '_' + name + '_crop' + str(i) + '_info.txt')
+                self.write_crop_info_file(info_file_path, softmax, predicted_class, gt_class, is_match, is_neutral,
+                                          pc_gt, dc_gt, cm_gt, pc_pred, dc_pred, cm_pred, i)
 
             except:
                 print('Error with image ' + name)
@@ -533,17 +628,6 @@ class SingleCellArch:
             name1 = filenames_reord[idx1].decode(sys.getdefaultencoding())
             name2 = filenames_reord[idx2].decode(sys.getdefaultencoding())
             is_intra = i < self.opts.n_comparisons_intra * self.opts.n_images_per_batch
-            if is_intra:
-                print('')
-                print('batch ' + str(self.batch_count_eval_debug) + ', comparison ' + str(i))
-                print('indices: ' + str(idx1) + ' - ' + str(idx2))
-                print('names: ' + name1 + ' - ' + name2)
-                is_match_1 = mask_match[idx1] > 0.5
-                is_match_2 = mask_match[idx2] > 0.5
-                is_neutral_1 = mask_neutral[idx1] > 0.5
-                is_neutral_2 = mask_neutral[idx2] > 0.5
-                print('match: ' + str(is_match_1) + ' - ' + str(is_match_2))
-                print('neutral: ' + str(is_neutral_1) + ' - ' + str(is_neutral_2))
             try:
                 is_valid = valid_comps[i] > 0.5
                 if is_valid:
@@ -585,13 +669,6 @@ class SingleCellArch:
                         pred_comp = 'same'
                     else:
                         pred_comp = 'diff'
-                    if is_intra:
-                        print('gt_comp = ' + gt_comp)
-                        print('pred_comp = ' + pred_comp)
-                        print('gt_class_1 = ' + str(gt_class_1))
-                        print('gt_class_2 = ' + str(gt_class_2))
-                        print('gt_idx_1 = ' + str(gt_idx_1))
-                        print('gt_idx_2 = ' + str(gt_idx_2))
                     # Make the mosaic and save it:
                     mosaic_name = 'batch' + str(self.batch_count_eval_debug) + '_comp' + str(i) + '_' + name1 + ' - ' + name2 + '.png'
                     if gt_comp == pred_comp:
@@ -604,8 +681,6 @@ class SingleCellArch:
                             mosaic_path = os.path.join(self.comparison_same_wrong, mosaic_name)
                         else:
                             mosaic_path = os.path.join(self.comparison_diff_wrong, mosaic_name)
-                    if is_intra:
-                        print('mosaic_path = ' + mosaic_path)
                     separator = np.zeros(shape=(network.receptive_field_size, 10, 3), dtype=np.float32)
                     mosaic = np.concatenate([crop1, separator, crop2], axis=1)  # (2*input_image_size+10, input_image_size, 3)
                     cv2.imwrite(mosaic_path, cv2.cvtColor(mosaic.astype(np.uint8), cv2.COLOR_RGB2BGR))
@@ -615,19 +690,20 @@ class SingleCellArch:
                 raise
 
         total_valid_comparisons = n_same + n_diff
-        proportion_valid_this_batch = float(total_valid_comparisons) / total_comparisons
-        if total_valid_comparisons > 0:
-            proportion_same_this_batch = float(n_same) / total_valid_comparisons
-        else:
-            proportion_same_this_batch = 0
-        self.proportion_valid_comparisons = (self.proportion_valid_comparisons * (self.batch_count_eval_debug - 1) +
-                                             proportion_valid_this_batch) / float(self.batch_count_eval_debug)
-        self.proportion_same_comparisons = (self.proportion_same_comparisons * (self.batch_count_eval_debug - 1) +
-                                            proportion_same_this_batch) / float(self.batch_count_eval_debug)
-        print('Percent of valid comparisons. This batch: {:3.2f}. Acummulated: {:3.2f}'.format(proportion_valid_this_batch * 100.0,
-                                                                                               self.proportion_valid_comparisons * 100.0))
-        print('Percent of same comparisons. This batch: {:3.2f}. Acummulated: {:3.2f}'.format(proportion_same_this_batch * 100.0,
-                                                                                               self.proportion_same_comparisons * 100.0))
+        if total_comparisons > 0:
+            proportion_valid_this_batch = float(total_valid_comparisons) / total_comparisons
+            if total_valid_comparisons > 0:
+                proportion_same_this_batch = float(n_same) / total_valid_comparisons
+            else:
+                proportion_same_this_batch = 0
+            self.proportion_valid_comparisons = (self.proportion_valid_comparisons * (self.batch_count_eval_debug - 1) +
+                                                 proportion_valid_this_batch) / float(self.batch_count_eval_debug)
+            self.proportion_same_comparisons = (self.proportion_same_comparisons * (self.batch_count_eval_debug - 1) +
+                                                proportion_same_this_batch) / float(self.batch_count_eval_debug)
+            print('Percent of valid comparisons. This batch: {:3.2f}. Acummulated: {:3.2f}'.format(proportion_valid_this_batch * 100.0,
+                                                                                                   self.proportion_valid_comparisons * 100.0))
+            print('Percent of same comparisons. This batch: {:3.2f}. Acummulated: {:3.2f}'.format(proportion_same_this_batch * 100.0,
+                                                                                                   self.proportion_same_comparisons * 100.0))
 
         return metrics
 

@@ -5,6 +5,7 @@ class CommonOptions:
         self.predict_pc = False
         self.predict_dc = False
         self.predict_cm = False
+        self.cm_same_class = False
 
         self.lcr = 512  # Length of Common Representation
 
