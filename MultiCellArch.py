@@ -114,7 +114,7 @@ class MultiCellArch:
         return inputs_all_sizes
 
     def net_on_every_size(self, inputs_all_sizes):
-        n_channels_last = CommonEncoding.get_n_channels_last(self.nclasses, self.opts.predict_pc, self.opts.predict_dc)
+        n_channels_last = CommonEncoding.get_n_channels_last(self.nclasses, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)
         self.n_boxes = 0
         all_outputs = []
         all_crs = []
@@ -191,9 +191,9 @@ class MultiCellArch:
 
         # Split net output:
         locs_enc = output_encoding.get_loc_enc(net_output)  # (batch_size, nboxes, 4)
-        logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nboxes, nclasses)
-        pc_enc = output_encoding.get_pc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nboxes) or None
-        dc_enc = output_encoding.get_dc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nboxes) or None
+        logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size, nboxes, nclasses)
+        pc_enc = output_encoding.get_pc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size, nboxes) or None
+        dc_enc = output_encoding.get_dc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size, nboxes) or None
 
         # Decode
         localizations_dec = self.decode_boxes_wrt_padded_tf(locs_enc)  # (batch_size, nboxes, 4)

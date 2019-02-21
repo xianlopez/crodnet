@@ -4,6 +4,7 @@ class CommonOptions:
 
         self.predict_pc = False
         self.predict_dc = False
+        self.predict_cm = False
 
         self.lcr = 512  # Length of Common Representation
 
@@ -46,6 +47,7 @@ class SingleCellOptions(CommonOptions):
         self.comp_loss_factor = 1
         self.pc_loss_factor = 0.2
         self.dc_loss_factor = 0.2
+        self.cm_loss_factor = 0.5
 
         self.debug_train = False
         self.debug_eval = False

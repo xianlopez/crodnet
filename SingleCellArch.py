@@ -15,13 +15,15 @@ class SingleCellArch:
         self.opts = options
         self.nclasses = nclasses + 1 # The last class id is for the background
         self.background_id = self.nclasses - 1
-        self.n_labels = 10
+        self.n_labels = 11
         self.batch_size = self.opts.n_images_per_batch * self.opts.n_crops_per_image
         self.metric_names = ['accuracy_conf', 'iou_mean', 'accuracy_comp']
         if self.opts.predict_pc:
             self.metric_names.append('pc_mean_err')
         if self.opts.predict_dc:
             self.metric_names.append('dc_mean_err')
+        if self.opts.predict_cm:
+            self.metric_names.append('cm_mean_err')
         self.n_metrics = len(self.metric_names)
         self.outdir = outdir
         self.classnames = None
@@ -49,7 +51,7 @@ class SingleCellArch:
         inputs_reord = simplify_batch_dimensions(inputs)  # (batch_size, input_image_size, input_image_size, 3)
         labels_enc_reord = simplify_batch_dimensions(labels_enc)  # (batch_size, n_labels)
         common_representation = network.common_representation(inputs_reord, self.opts.lcr)  # (batch_size, 1, 1, lcr)
-        n_channels_last = CommonEncoding.get_n_channels_last(self.nclasses, self.opts.predict_pc, self.opts.predict_dc)
+        n_channels_last = CommonEncoding.get_n_channels_last(self.nclasses, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)
         net_output = network.prediction_path(common_representation, self.opts, n_channels_last)  # (batch_size, 1, 1, n_channels_last)
         common_representation = tf.squeeze(common_representation, axis=[1, 2])  # (batch_size, lcr)
         net_output = tf.squeeze(net_output, axis=[1, 2])  # (batch_size, n_channels_last)
@@ -135,9 +137,10 @@ class SingleCellArch:
 
         # Split net output:
         locs_enc = output_encoding.get_loc_enc(net_output)  # (batch_size, 4)
-        logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nclasses)
-        pc_pred = output_encoding.get_pc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
-        dc_pred = output_encoding.get_dc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
+        logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size, nclasses)
+        pc_pred = output_encoding.get_pc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size) or None
+        dc_pred = output_encoding.get_dc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size) or None
+        cm_pred = output_encoding.get_cm_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size) or None
 
         mask_match = gt_encoding.get_mask_match(labels_enc_reord)  # (batch_size)
         mask_neutral = gt_encoding.get_mask_neutral(labels_enc_reord)  # (batch_size)
@@ -145,6 +148,7 @@ class SingleCellArch:
         gt_coords = gt_encoding.get_coords_enc(labels_enc_reord)  # (batch_size)
         pc_label = gt_encoding.get_pc_enc(labels_enc_reord)  # (batch_size)
         dc_label = gt_encoding.get_dc_enc(labels_enc_reord)  # (batch_size)
+        cm_label = gt_encoding.get_cm_enc(labels_enc_reord)  # (batch_size)
 
         mask_match = tf.greater(mask_match, 0.5)
         mask_neutral = tf.greater(mask_neutral, 0.5)
@@ -174,16 +178,23 @@ class SingleCellArch:
         if self.opts.predict_pc:
             pc_loss, pc_metric = pc_loss_and_metric(pc_pred, pc_label, mask_match, mask_neutral, zeros, self.opts.pc_loss_factor)
             tf.summary.scalar('losses/pc_loss', pc_loss)
-            tf.summary.scalar('metrics/pc_metric', pc_metric)
+            tf.summary.scalar('metrics/pc_mean_err', pc_metric)
             total_loss += pc_loss
             metrics = tf.concat([metrics, tf.expand_dims(pc_metric, axis=0)], axis=0)
 
         if self.opts.predict_dc:
             dc_loss, dc_metric = dc_loss_and_metric(dc_pred, dc_label, mask_match, mask_neutral, zeros, self.opts.dc_loss_factor)
             tf.summary.scalar('losses/dc_loss', dc_loss)
-            tf.summary.scalar('metrics/dc_metric', dc_metric)
+            tf.summary.scalar('metrics/dc_mean_err', dc_metric)
             total_loss += dc_loss
             metrics = tf.concat([metrics, tf.expand_dims(dc_metric, axis=0)], axis=0)
+
+        if self.opts.predict_cm:
+            cm_loss, cm_metric = cm_loss_and_metric(cm_pred, cm_label, mask_match, zeros, self.opts.cm_loss_factor)
+            tf.summary.scalar('losses/cm_loss', cm_loss)
+            tf.summary.scalar('metrics/cm_mean_err', cm_metric)
+            total_loss += cm_loss
+            metrics = tf.concat([metrics, tf.expand_dims(cm_metric, axis=0)], axis=0)
 
         # total_loss: ()
         # metrics: (n_metrics)
@@ -211,6 +222,7 @@ class SingleCellArch:
             mask_pc = pc > self.opts.threshold_pc  # (n_gt)
             mask_dc = dc < self.opts.threshold_dc  # (n_gt)
             mask_thresholds = mask_ar_low & mask_ar_high & mask_pc & mask_dc  # (n_gt)
+            n_matches = np.sum(mask_thresholds.astype(np.int32))  # ()
             any_match = np.any(mask_thresholds)  # ()
 
             # Neutral boxes:
@@ -228,7 +240,19 @@ class SingleCellArch:
             else:
                 dc_masked = np.where(mask_thresholds_neutral, dc, np.infty * np.ones(shape=(n_gt), dtype=np.float32) ) # (n_gt)
 
-            nearest_valid_box_idx = np.argmin(dc_masked)  # ()
+            indices_sort = np.argsort(dc_masked)
+            dc_masked = dc_masked[indices_sort]
+
+            nearest_valid_box_idx = indices_sort[0]  # ()
+
+            # Centrality measure:
+            if any_match:
+                if n_matches > 1:
+                    cm = 1 - (dc_masked[1] - dc_masked[0]) / np.sqrt(2)
+                else:
+                    cm = 1
+            else:
+                cm = 0
 
             # Get the coordinates and the class id of the gt box matched:
             if is_negative:
@@ -251,6 +275,7 @@ class SingleCellArch:
 
             pc_enc = CommonEncoding.encode_pc_or_dc_np(pc_associated)
             dc_enc = CommonEncoding.encode_pc_or_dc_np(dc_associated)
+            cm_enc = CommonEncoding.encode_cm_np(cm)
 
             # Put all together in one array:
             labels_enc = np.stack([any_match.astype(np.float32),
@@ -258,7 +283,8 @@ class SingleCellArch:
                                    class_id,
                                    associated_gt_idx,
                                    pc_enc,
-                                   dc_enc])
+                                   dc_enc,
+                                   cm_enc])
             labels_enc = np.concatenate([coordinates_enc, labels_enc])  # (n_labels)
 
         else:
@@ -278,9 +304,9 @@ class SingleCellArch:
 
         # Split net output:
         locs_enc = output_encoding.get_loc_enc(net_output)  # (batch_size, 4)
-        logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nclasses)
-        pc_enc = output_encoding.get_pc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
-        dc_enc = output_encoding.get_dc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
+        logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size, nclasses)
+        pc_enc = output_encoding.get_pc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size) or None
+        dc_enc = output_encoding.get_dc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size) or None
 
         if self.classnames is None:
             raise Exception('classnames must be specified if debugging.')
@@ -443,9 +469,9 @@ class SingleCellArch:
 
         # Split net output:
         locs_enc = output_encoding.get_loc_enc(net_output)  # (batch_size, 4)
-        logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nclasses)
-        pc_enc = output_encoding.get_pc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
-        dc_enc = output_encoding.get_dc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size) or None
+        logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size, nclasses)
+        pc_enc = output_encoding.get_pc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size) or None
+        dc_enc = output_encoding.get_dc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size) or None
 
         if self.classnames is None:
             raise Exception('classnames must be specified if debugging.')
@@ -738,6 +764,33 @@ def dc_loss_and_metric(dc_pred, dc_label, mask_match, mask_neutral, zeros, dc_lo
         diff_sum = tf.reduce_sum(diff_masked)  # ()
         diff_mean = tf.divide(diff_sum, n_valids_safe, name='diff_mean')  # ()
     return loss_dc, diff_mean
+
+
+def cm_loss_and_metric(cm_pred, cm_label, mask_match, zeros, cm_loss_factor):
+    # cm_pred: (batch_size) encoded
+    # cm_label: (batch_size) encoded
+    # mask_match: (batch_size)
+    # mask_neutral: (batch_size)
+    # zeros: (batch_size)
+    with tf.variable_scope('cm_loss'):
+        # Loss:
+        cm_loss_orig = CommonEncoding.smooth_L1_loss(cm_label, cm_pred, reduce_last_dim=False)  # (batch_size)
+        valids_for_cm = mask_match  # (batch_size)
+        n_valids = tf.reduce_sum(tf.cast(valids_for_cm, tf.int32), name='n_valids')  # ()
+        n_valids_safe = tf.maximum(tf.cast(n_valids, tf.float32), 1)
+        cm_loss_matches = tf.where(valids_for_cm, cm_loss_orig, zeros, name='loss_match')  # (batch_size)
+        cm_loc_summed = tf.reduce_sum(cm_loss_matches, name='loss_summed')  # ()
+        cm_loc_scaled = tf.divide(cm_loc_summed, n_valids_safe, name='loss_scaled')  # ()
+        loss_cm = tf.multiply(cm_loc_scaled, cm_loss_factor, name='loss_cm')  # ()
+
+        # Metric:
+        cm_pred_dec = CommonEncoding.decode_cm_tf(cm_pred)  # (batch_size)
+        cm_label_dec = CommonEncoding.decode_cm_tf(cm_label)  # (batch_size)
+        abs_difference = tf.abs(cm_pred_dec - cm_label_dec)  # (batch_size)
+        diff_masked = tf.where(valids_for_cm, abs_difference, zeros)  # (batch_size)
+        diff_sum = tf.reduce_sum(diff_masked)  # ()
+        diff_mean = tf.divide(diff_sum, n_valids_safe, name='diff_mean')  # ()
+    return loss_cm, diff_mean
 
 
 def simplify_batch_dimensions(x):

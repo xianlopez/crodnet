@@ -175,11 +175,29 @@ def encode_pc_or_dc_np(x_dec):
     return x_enc
 
 
-def get_n_channels_last(nclasses, predict_pc, predict_dc):
+def encode_cm_np(cm_dec):
+    cm_enc = cm_dec * 10
+    return cm_enc
+
+
+def decode_cm_np(cm_enc):
+    cm_dec = cm_enc * 0.1
+    return cm_dec
+
+
+def decode_cm_tf(cm_enc):
+    # x_enc: any shape
+    cm_dec = tf.clip_by_value(cm_enc * 0.1, 0.0, 1.0)
+    return cm_dec
+
+
+def get_n_channels_last(nclasses, predict_pc, predict_dc, predict_cm):
     n_channles_last = 4 + nclasses
     if predict_pc:
         n_channles_last += 1
     if predict_dc:
+        n_channles_last += 1
+    if predict_cm:
         n_channles_last += 1
     return n_channles_last
 

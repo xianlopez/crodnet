@@ -1,6 +1,11 @@
 
 
 
+def get_coords_enc(labels_enc):
+    # labels_enc_reord: (..., n_labels)
+    return labels_enc[..., :4]
+
+
 def get_mask_match(labels_enc):
     # labels_enc_reord: (..., n_labels)
     return labels_enc[..., 4]
@@ -31,6 +36,6 @@ def get_dc_enc(labels_enc):
     return labels_enc[..., 9]
 
 
-def get_coords_enc(labels_enc):
+def get_cm_enc(labels_enc):
     # labels_enc_reord: (..., n_labels)
-    return labels_enc[..., :4]
+    return labels_enc[..., 10]
