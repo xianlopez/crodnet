@@ -114,6 +114,7 @@ class MultiCellArch:
         return inputs_all_sizes
 
     def net_on_every_size(self, inputs_all_sizes):
+        n_channels_last = CommonEncoding.get_n_channels_last(self.nclasses, self.opts.predict_pc, self.opts.predict_dc)
         self.n_boxes = 0
         all_outputs = []
         all_crs = []
@@ -122,13 +123,13 @@ class MultiCellArch:
             print('')
             print('Defining network for input size ' + str(grid.input_size) + ' (pad: ' + str(grid.pad_abs) + ')')
             common_representation = network.common_representation(inputs_all_sizes[i], self.opts.lcr)
-            net = network.prediction_path(common_representation, self.opts, self.nclasses, self.opts.predict_pc, self.opts.predict_dc)
-            net_shape = net.shape.as_list()
-            assert net_shape[1] == net_shape[2], 'Different width and height at network output'
-            grid.set_output_shape(net_shape[1], network.receptive_field_size)
+            net_output = network.prediction_path(common_representation, self.opts, n_channels_last)
+            net_output_shape = net_output.shape.as_list()  # (batch_size, output_side, output_side, n_channels_last)
+            assert net_output_shape[1] == net_output_shape[2], 'Different width and height at network output'
+            grid.set_output_shape(net_output_shape[1], network.receptive_field_size)
             grid.set_flat_start_pos(self.n_boxes)
             self.max_pad_rel = max(self.max_pad_rel, grid.pad_rel)
-            output_flat = tf.reshape(net, [-1, grid.n_boxes, 4+self.nclasses], name='output_flat')
+            output_flat = tf.reshape(net_output, [-1, grid.n_boxes, n_channels_last], name='output_flat')
             cr_flat = tf.reshape(common_representation, [-1, grid.n_boxes, self.opts.lcr], name='cr_flat')
             self.n_boxes += grid.n_boxes
             all_outputs.append(output_flat)
@@ -136,7 +137,7 @@ class MultiCellArch:
             if (grid.input_size_w_pad - network.receptive_field_size) / network.step_in_pixels + 1 != grid.output_shape:
                 raise Exception('Inconsistent step for input size ' + str(grid.input_size_w_pad) + '. Grid size is ' + str(grid.output_shape) + '.')
         assert self.n_boxes == self.get_expected_num_boxes(), 'Expected number of boxes differs from the real number.'
-        all_outputs = tf.concat(all_outputs, axis=1, name='all_outputs')  # (batch_size, nboxes, 4+nclasses)
+        all_outputs = tf.concat(all_outputs, axis=1, name='all_outputs')  # (batch_size, nboxes, n_channels_last)
         all_crs = tf.concat(all_crs, axis=1, name='all_crs')  # (batch_size, nboxes, lcr)
         self.input_image_size_w_pad = int(np.ceil(float(self.input_image_size) / (1 - 2 * self.max_pad_rel)))
         self.max_pad_abs = int(np.round(self.max_pad_rel * self.input_image_size_w_pad))
@@ -146,7 +147,7 @@ class MultiCellArch:
         print('Maximum absolute pad: ' + str(self.max_pad_abs))
         print('Input image size with pad: ' + str(self.input_image_size_w_pad))
         self.print_grids_info()
-        return all_outputs, all_crs  # (batch_size, nboxes, ?)
+        return all_outputs, all_crs
 
 
     def print_grids_info(self):
@@ -191,12 +192,20 @@ class MultiCellArch:
         # Split net output:
         locs_enc = output_encoding.get_loc_enc(net_output)  # (batch_size, nboxes, 4)
         logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nboxes, nclasses)
-        pc = output_encoding.get_pc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nboxes) or None
-        dc = output_encoding.get_dc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nboxes) or None
+        pc_enc = output_encoding.get_pc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nboxes) or None
+        dc_enc = output_encoding.get_dc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nboxes) or None
 
         # Decode
         localizations_dec = self.decode_boxes_wrt_padded_tf(locs_enc)  # (batch_size, nboxes, 4)
         softmax = tf.nn.softmax(logits, axis=-1)  # (batch_size, nboxes, nclasses)
+        if self.opts.predict_pc:
+            pc = CommonEncoding.decode_pc_or_dc_tf(pc_enc)
+        else:
+            pc = None
+        if self.opts.predict_dc:
+            dc = CommonEncoding.decode_pc_or_dc_tf(dc_enc)
+        else:
+            dc = None
 
         return localizations_dec, softmax, pc, dc
 
@@ -360,13 +369,13 @@ class MultiCellArch:
         # arg: [net_output, inputs0, ..., inputsN]
         # net_output: (batch_size, nboxes, 4+nclasses)
         # inputsX: (batch_size, height, width, 3)
-        net_output = arg[0]
+        net_output = arg[0]  # (batch_size, nboxes, n_channels_last)
         inputs_all_sizes = []
         for i in range(1, len(arg)):
             inputs_all_sizes.append(arg[i])
         batch_size = net_output.shape[0]
-        localizations_enc = net_output[..., :4]  # (batch_size, nboxes, 4)
-        logits = net_output[..., 4:]  # (batch_size, nboxes, nclasses)
+        localizations_enc = output_encoding.get_loc_enc(net_output)  # (batch_size, nboxes, 4)
+        logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nboxes, nclasses)
         e_x = np.exp(logits - np.max(logits))  # (batch_size, nboxes, nclasses)
         denominator = np.tile(np.sum(e_x, axis=-1, keepdims=True), [1, 1, self.nclasses])  # (batch_size, nboxes, nclasses)
         softmax = e_x / denominator  # (batch_size, nboxes, nclasses)

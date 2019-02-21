@@ -175,6 +175,15 @@ def encode_pc_or_dc_np(x_dec):
     return x_enc
 
 
+def get_n_channels_last(nclasses, predict_pc, predict_dc):
+    n_channles_last = 4 + nclasses
+    if predict_pc:
+        n_channles_last += 1
+    if predict_dc:
+        n_channles_last += 1
+    return n_channles_last
+
+
 
 
 

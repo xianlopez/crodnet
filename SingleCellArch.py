@@ -49,10 +49,10 @@ class SingleCellArch:
         inputs_reord = simplify_batch_dimensions(inputs)  # (batch_size, input_image_size, input_image_size, 3)
         labels_enc_reord = simplify_batch_dimensions(labels_enc)  # (batch_size, n_labels)
         common_representation = network.common_representation(inputs_reord, self.opts.lcr)  # (batch_size, 1, 1, lcr)
-        net_output = network.prediction_path(common_representation, self.opts, self.nclasses,
-                                             predict_pc=self.opts.predict_pc, predict_dc=self.opts.predict_dc)  # (batch_size, 1, 1, ?)
+        n_channels_last = CommonEncoding.get_n_channels_last(self.nclasses, self.opts.predict_pc, self.opts.predict_dc)
+        net_output = network.prediction_path(common_representation, self.opts, n_channels_last)  # (batch_size, 1, 1, n_channels_last)
         common_representation = tf.squeeze(common_representation, axis=[1, 2])  # (batch_size, lcr)
-        net_output = tf.squeeze(net_output, axis=[1, 2])  # (batch_size, ?)
+        net_output = tf.squeeze(net_output, axis=[1, 2])  # (batch_size, n_channels_last)
         # Make comparisons:
         comparisons_pred, comps_validity_labels, comparisons_indices = self.make_comparisons(common_representation, labels_enc_reord)
         # comparisons_pred, indices_all_comparisons: (total_comparisons, 2)
