@@ -183,8 +183,8 @@ class MultiCellArch:
             net_output_shape = net_output.shape
             net_output = tf.py_func(self.write_debug_info, debug_inputs, (tf.float32))
             net_output.set_shape(net_output_shape)
-        localizations, softmax, pc, dc = self.obtain_localizations_and_softmax(net_output)
-        return localizations, softmax, CRs, pc, dc
+        localizations, softmax, pc, dc, cm = self.obtain_localizations_and_softmax(net_output)
+        return localizations, softmax, CRs, pc, dc, cm
 
     def obtain_localizations_and_softmax(self, net_output):
         # net_output: (batch_size, nboxes, ?)
@@ -194,6 +194,7 @@ class MultiCellArch:
         logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size, nboxes, nclasses)
         pc_enc = output_encoding.get_pc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size, nboxes) or None
         dc_enc = output_encoding.get_dc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size, nboxes) or None
+        cm_enc = output_encoding.get_cm_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size, nboxes) or None
 
         # Decode
         localizations_dec = self.decode_boxes_wrt_padded_tf(locs_enc)  # (batch_size, nboxes, 4)
@@ -206,8 +207,12 @@ class MultiCellArch:
             dc = CommonEncoding.decode_pc_or_dc_tf(dc_enc)
         else:
             dc = None
+        if self.opts.predict_cm:
+            cm = CommonEncoding.decode_cm_tf(cm_enc)
+        else:
+            cm = None
 
-        return localizations_dec, softmax, pc, dc
+        return localizations_dec, softmax, pc, dc, cm
 
 
     def get_grid_idx_from_flat_position(self, position):
@@ -365,6 +370,20 @@ class MultiCellArch:
 
         return pc, ar, dc
 
+    def write_anchor_info_file(self, info_file_path, softmax, pred_class, cm_pred, img_idx, anchor_pos):
+        # softmax: (nclasses)
+        with open(info_file_path, 'w') as fid:
+            fid.write('softmax =')
+            for j in range(self.nclasses):
+                if j != 0:
+                    fid.write(',')
+                fid.write(' ' + str(softmax[img_idx, anchor_pos, j]))
+            fid.write('\n')
+            fid.write('predicted_class = ' + str(pred_class) + ' (' + self.classnames[pred_class] + ')\n')
+            fid.write('conf = ' + str(softmax[img_idx, anchor_pos, pred_class]) + '\n')
+            if self.opts.predict_cm:
+                fid.write('cm_pred = ' + str(cm_pred[img_idx, anchor_pos]) + '\n')
+
     def write_debug_info(self, *arg):
         # arg: [net_output, inputs0, ..., inputsN]
         # net_output: (batch_size, nboxes, 4+nclasses)
@@ -374,9 +393,13 @@ class MultiCellArch:
         for i in range(1, len(arg)):
             inputs_all_sizes.append(arg[i])
         batch_size = net_output.shape[0]
+
         localizations_enc = output_encoding.get_loc_enc(net_output)  # (batch_size, nboxes, 4)
-        logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc)  # (batch_size, nboxes, nclasses)
+        logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size, nboxes, nclasses)
         softmax = tools.softmax_np(logits)  # (batch_size, nboxes, nclasses)
+        cm_pred_enc = output_encoding.get_cm_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size, nboxes) or None
+        cm_pred = CommonEncoding.decode_cm_np(cm_pred_enc)  # (batch_size, nboxes) or None
+
         self.batch_count_debug += 1
         batch_dir = os.path.join(self.debug_dir, 'batch' + str(self.batch_count_debug))
         os.makedirs(batch_dir)
@@ -409,6 +432,9 @@ class MultiCellArch:
                         bbox = np.expand_dims(bbox, axis=0)  # (1, 5)
                         img = tools.add_bounding_boxes_to_image2(img, bbox, self.classnames, color=(127, 0, 127))
                 cv2.imwrite(path_to_save, cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_RGB2BGR))
+                # Save info file:
+                info_file_path = os.path.join(batch_dir, 'img' + str(img_idx) + '_pos' + str(pos) + '_info.txt')
+                self.write_anchor_info_file(info_file_path, softmax, predicted_class, cm_pred, img_idx, pos)
         return net_output
 
 

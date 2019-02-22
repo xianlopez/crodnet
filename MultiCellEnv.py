@@ -52,16 +52,24 @@ class MultiCellEnv:
             end_of_epoch = False
             while not end_of_epoch:
                 step += 1
+                print('batch ' + str(step))
                 if step % self.opts.nsteps_display == 0:
                     print('Step %i / %i' % (step, nbatches))
                 batch_images, batch_bboxes, batch_filenames, end_of_epoch = self.reader.get_next_batch()
-                localizations, softmax, CRs = sess.run([self.localizations, self.softmax, self.common_representations],
-                                                       feed_dict={self.inputs: batch_images})
+                if self.opts.multi_cell_opts.predict_cm:
+                    localizations, softmax, CRs, cm = sess.run([self.localizations, self.softmax, self.common_representations, self.cm],
+                                                           feed_dict={self.inputs: batch_images})
+                else:
+                    localizations, softmax, CRs = sess.run([self.localizations, self.softmax, self.common_representations],
+                                                           feed_dict={self.inputs: batch_images})
+                    cm = None
                 # softmax = self.remove_repeated_predictions(softmax, CRs, sess)
                 # Convert output arrays to BoundingBox objects:
-                batch_gt_boxes, batch_pred_boxes = self.postprocess_gt_and_preds(batch_bboxes, localizations, softmax)
+                batch_gt_boxes, batch_pred_boxes = self.postprocess_gt_and_preds(batch_bboxes, localizations, softmax, cm)
                 # Supress repeated predictions with non-maximum suppression:
                 batch_pred_boxes = non_maximum_suppression_batched(batch_pred_boxes, self.opts.threshold_nms)
+                # Supress repeated predictions that non-maximum supression using Centrality Measure:
+                batch_pred_boxes = self.nms_cm_batched(batch_pred_boxes)
                 # Supress repeated predictions with comparisons:
                 batch_pred_boxes = self.remove_repeated_predictions_batched(batch_pred_boxes, CRs, sess)
                 # Mark True and False positives:
@@ -85,7 +93,7 @@ class MultiCellEnv:
         self.nclasses = len(self.classnames)
         self.multi_cell_arch = MultiCellArch.MultiCellArch(self.opts.multi_cell_opts, self.nclasses, self.opts.outdir, self.opts.th_conf, self.classnames)
         self.define_inputs_and_labels()
-        self.localizations, self.softmax, self.common_representations, pc, dc = self.multi_cell_arch.make(self.inputs)
+        self.localizations, self.softmax, self.common_representations, pc, dc, self.cm = self.multi_cell_arch.make(self.inputs)
         self.restore_fn = tf.contrib.framework.assign_from_checkpoint_fn(self.opts.weights_file, tf.global_variables())
 
     def define_inputs_and_labels(self):
@@ -161,10 +169,11 @@ class MultiCellEnv:
 
         return remaining_boxes, n_comparisons
 
-    def postprocess_gt_and_preds(self, bboxes, localizations, softmax):
+    def postprocess_gt_and_preds(self, bboxes, localizations, softmax, cm):
         # bboxes: List of length batch_size, with elements (n_gt, 7) [class_id, x_min, y_min, width, height, pc, gt_idx]
         # localizations: (batch_size, nboxes, 4) [xmin, ymin, width, height]
         # softmax: (batch_size, nboxes, nclasses) [conf1, ..., confN]
+        # cm: (batch_size, nboxes) or None
         batch_gt_boxes = []
         batch_pred_boxes = []
         batch_size = len(bboxes)
@@ -182,18 +191,62 @@ class MultiCellEnv:
                 if self.opts.detect_against_background:
                     pred_class = np.argmax(softmax[img_idx, box_idx, :])
                     if pred_class != self.multi_cell_arch.background_id:
-                        pred_box = BoundingBoxes.PredictedBox(localizations[img_idx, box_idx], pred_class, softmax[img_idx, box_idx, pred_class], box_idx)
-                        img_pred_boxes.append(pred_box)
+                        if self.opts.multi_cell_opts.predict_cm:
+                            if cm[img_idx, box_idx] > self.opts.th_cm_low:
+                                pred_box = BoundingBoxes.PredictedBox(localizations[img_idx, box_idx], pred_class,
+                                                                      softmax[img_idx, box_idx, pred_class], box_idx, cm=cm[img_idx, box_idx])
+                                img_pred_boxes.append(pred_box)
+                        else:
+                            pred_box = BoundingBoxes.PredictedBox(localizations[img_idx, box_idx], pred_class, softmax[img_idx, box_idx, pred_class], box_idx)
+                            img_pred_boxes.append(pred_box)
                 else:
                     pred_class = np.argmax(softmax[img_idx, box_idx, :-1])
                     conf = softmax[img_idx, box_idx, pred_class]
-                    if conf > self.opts.th_conf:
-                        pred_box = BoundingBoxes.PredictedBox(localizations[img_idx, box_idx], pred_class, conf, box_idx)
-                        img_pred_boxes.append(pred_box)
+                    if self.opts.multi_cell_opts.predict_cm:
+                        if conf > self.opts.th_conf and cm[img_idx, box_idx] > self.opts.th_cm_low:
+                            pred_box = BoundingBoxes.PredictedBox(localizations[img_idx, box_idx], pred_class, conf, box_idx, cm=cm[img_idx, box_idx])
+                            img_pred_boxes.append(pred_box)
+                    else:
+                        if conf > self.opts.th_conf:
+                            pred_box = BoundingBoxes.PredictedBox(localizations[img_idx, box_idx], pred_class, conf, box_idx)
+                            img_pred_boxes.append(pred_box)
 
             batch_pred_boxes.append(img_pred_boxes)
 
         return batch_gt_boxes, batch_pred_boxes
+
+    def nms_cm_batched(self, batch_boxes):
+        # batch_boxes: List of size batch_size, with lists with all the predicted bounding boxes in an image.
+        batch_remaining_boxes = []
+        batch_size = len(batch_boxes)
+        for img_idx in range(batch_size):
+            print('img ' + str(img_idx))
+            remaining_boxes = self.nms_cm(batch_boxes[img_idx])
+            batch_remaining_boxes.append(remaining_boxes)
+        return batch_remaining_boxes
+
+    def nms_cm(self, boxes):
+        # boxes: List with all the predicted bounding boxes in the image.
+        boxes_that_can_be_suppressed = []
+        boxes_that_cannot_be_suppressed = []
+        for box in boxes:
+            if box.cm < self.opts.th_cm_high:
+                boxes_that_can_be_suppressed.append(box)
+            else:
+                boxes_that_cannot_be_suppressed.append(box)
+        boxes_that_can_be_suppressed.sort(key=operator.attrgetter('cm'), reverse=True)
+        nboxes = len(boxes_that_can_be_suppressed)
+        for i in range(nboxes):
+            if boxes_that_can_be_suppressed[i].confidence != -np.inf:
+                for j in range(i + 1, nboxes):
+                    if boxes_that_can_be_suppressed[j].confidence != -np.inf:
+                        if tools.compute_iou(boxes_that_can_be_suppressed[i].get_coords(), boxes_that_can_be_suppressed[j].get_coords()) > self.opts.cm_iou:
+                            boxes_that_can_be_suppressed[j].confidence = -np.inf
+                            print('Removing box ' + str(j) + ' (blame on box ' + str(i) + ')')
+        remaining_boxes = [x for x in boxes_that_can_be_suppressed if x.confidence != -np.inf]
+        remaining_boxes = remaining_boxes + boxes_that_cannot_be_suppressed
+        remaining_boxes.sort(key=operator.attrgetter('confidence'), reverse=True)
+        return remaining_boxes
 
 
 def non_maximum_suppression_batched(batch_boxes, threshold_nms):

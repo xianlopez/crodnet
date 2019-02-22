@@ -35,6 +35,10 @@ class MultiCellConfiguration:
     detect_against_background = False
     th_conf = 0.9
 
+    th_cm_low = 0.1
+    th_cm_high = 0.2
+    cm_iou = 0.2
+
     write_results = False
 
     threshold_nms = 0.5
