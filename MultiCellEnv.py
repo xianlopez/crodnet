@@ -52,7 +52,8 @@ class MultiCellEnv:
             end_of_epoch = False
             while not end_of_epoch:
                 step += 1
-                print('batch ' + str(step))
+                print('')
+                print('BATCH ' + str(step))
                 if step % self.opts.nsteps_display == 0:
                     print('Step %i / %i' % (step, nbatches))
                 batch_images, batch_bboxes, batch_filenames, end_of_epoch = self.reader.get_next_batch()
@@ -71,7 +72,7 @@ class MultiCellEnv:
                 # Supress repeated predictions that non-maximum supression using Centrality Measure:
                 batch_pred_boxes = self.nms_cm_batched(batch_pred_boxes)
                 # Supress repeated predictions with comparisons:
-                batch_pred_boxes = self.remove_repeated_predictions_batched(batch_pred_boxes, CRs, sess)
+                # batch_pred_boxes = self.remove_repeated_predictions_batched(batch_pred_boxes, CRs, sess)
                 # Mark True and False positives:
                 batch_pred_boxes = mark_true_false_positives(batch_pred_boxes, batch_gt_boxes, self.opts.threshold_iou)
                 if self.opts.write_results:
@@ -217,6 +218,7 @@ class MultiCellEnv:
 
     def nms_cm_batched(self, batch_boxes):
         # batch_boxes: List of size batch_size, with lists with all the predicted bounding boxes in an image.
+        print('nms_cm_batched')
         batch_remaining_boxes = []
         batch_size = len(batch_boxes)
         for img_idx in range(batch_size):
@@ -241,8 +243,9 @@ class MultiCellEnv:
                 for j in range(i + 1, nboxes):
                     if boxes_that_can_be_suppressed[j].confidence != -np.inf:
                         if tools.compute_iou(boxes_that_can_be_suppressed[i].get_coords(), boxes_that_can_be_suppressed[j].get_coords()) > self.opts.cm_iou:
+                            assert boxes_that_can_be_suppressed[i].cm >= boxes_that_can_be_suppressed[j].cm, 'Suppressing boxes in reverse order in NMS-CM'
                             boxes_that_can_be_suppressed[j].confidence = -np.inf
-                            print('Removing box ' + str(j) + ' (blame on box ' + str(i) + ')')
+                            print('Removing box ' + str(boxes_that_can_be_suppressed[j].anc_idx) + ' (blame on box ' + str(boxes_that_can_be_suppressed[i].anc_idx) + ')')
         remaining_boxes = [x for x in boxes_that_can_be_suppressed if x.confidence != -np.inf]
         remaining_boxes = remaining_boxes + boxes_that_cannot_be_suppressed
         remaining_boxes.sort(key=operator.attrgetter('confidence'), reverse=True)
@@ -251,6 +254,7 @@ class MultiCellEnv:
 
 def non_maximum_suppression_batched(batch_boxes, threshold_nms):
     # batch_boxes: List of size batch_size, with lists with all the predicted bounding boxes in an image.
+    print('non_maximum_suppression_batched')
     batch_remaining_boxes = []
     batch_size = len(batch_boxes)
     for img_idx in range(batch_size):
@@ -263,12 +267,17 @@ def non_maximum_suppression(boxes, threshold_nms):
     # boxes: List with all the predicted bounding boxes in the image.
     nboxes = len(boxes)
     boxes.sort(key=operator.attrgetter('confidence'), reverse=True)
+    if len(boxes) > 1:
+        print('boxes[0] = ' + str(boxes[0].confidence))
+        print('boxes[1] = ' + str(boxes[1].confidence))
     for i in range(nboxes):
         if boxes[i].confidence != -np.inf:
             for j in range(i + 1, nboxes):
                 if boxes[j].confidence != -np.inf:
                     if tools.compute_iou(boxes[i].get_coords(), boxes[j].get_coords()) > threshold_nms:
+                        assert boxes[i].confidence >= boxes[j].confidence, 'Suppressing boxes in reverse order in NMS'
                         boxes[j].confidence = -np.inf
+                        print('Removing box ' + str(boxes[j].anc_idx) + ' (blame on box ' + str(boxes[i].anc_idx) + ')')
     remaining_boxes = [x for x in boxes if x.confidence != -np.inf]
     return remaining_boxes
 
@@ -280,6 +289,7 @@ def write_results(images, pred_boxes, gt_boxes, filenames, classnames, images_di
     # filenames: List of length batch_size.
     batch_size = len(images)
     for img_idx in range(batch_size):
+        print('img ' + str(img_idx))
         img = images[img_idx]
         img = tools.add_mean_again(img)
         img = np.round(img).astype(np.uint8)
@@ -303,6 +313,8 @@ def draw_result(img, pred_boxes, gt_boxes, classnames):
         cv2.rectangle(img, (xmin, ymin), (xmin + w, ymin + h), (0, 0, 255), 2)
     # Draw predictions:
     for box in pred_boxes:
+        print('box from anchor ' + str(box.anc_idx))
+        box.print()
         conf = box.confidence
         [xmin, ymin, w, h] = box.get_abs_coords_cv(img)
         classid = int(box.classid)

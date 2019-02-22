@@ -11,6 +11,9 @@ class ImageCropperOptions:
         self.max_dc = 0.5
         self.min_ar = 0.05
         self.probability_random = 0.25
+        self.max_dc_pair = 0.5
+        self.min_ar_pair = 0.2
+        self.probability_pair = 0.3
 
 
 class ImageCropper:
@@ -70,6 +73,12 @@ class ImageCropper:
         rnd1 = np.random.rand()
         if rnd1 < self.opts.probability_random or n_gt == 0:
             patch, remaining_boxes = sample_random_patch(image, bboxes, img_side, self.opts.min_side_scale, self.opts.max_side_scale)
+        elif rnd1 < self.opts.probability_random + self.opts.probability_pair and n_gt >= 2:
+            box_idx1 = np.random.randint(0, n_gt)
+            difference = np.random.randint(1, n_gt)
+            box_idx2 = np.remainder(box_idx1 + difference, n_gt)
+            assert box_idx1 != box_idx2, 'Using same box when sampling focusing on pair.'
+            patch, remaining_boxes = sample_patch_focusing_on_pair(image, bboxes, img_side, box_idx1, box_idx2, self.opts.max_dc_pair, self.opts.min_ar_pair)
         else:
             box_idx = np.random.randint(0, n_gt)
             patch, remaining_boxes = sample_patch_focusing_on_object(image, bboxes, img_side, box_idx, self.opts.max_dc, self.opts.min_ar)
@@ -109,6 +118,30 @@ def pad_to_make_square(image, bboxes):
     bboxes[:, 3] = bboxes[:, 3] / (1.0 + rel_incr_left + rel_incr_right)
     bboxes[:, 4] = bboxes[:, 4] / (1.0 + rel_incr_top + rel_incr_bottom)
     return image, bboxes
+
+
+def sample_patch_focusing_on_pair(image, bboxes, img_side, obj1_idx, obj2_idx, max_dc, min_ar):
+    # image: (img_side, img_side, 3)
+    # bboxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
+    patch_x0_rel, patch_y0_rel, patch_side_rel = make_patch_shape_focusing_on_pair(bboxes[obj1_idx, :], bboxes[obj2_idx, :], max_dc, min_ar)
+    patch, remaining_boxes = sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_side_rel)
+    # patch: (patch_side_abs, patch_side_abs, 3)
+    # remaining_boxes: (n_remaining_boxes, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
+    return patch, remaining_boxes
+
+
+def make_patch_shape_focusing_on_pair(bbox1, bbox2, max_dc, min_ar):
+    # bbox1: (6) [class_id, xmin, ymin, width, height, percent_contained]
+    # bbox2: (6) [class_id, xmin, ymin, width, height, percent_contained]
+    xmin = min(bbox1[1], bbox2[1])
+    ymin = min(bbox1[2], bbox2[2])
+    xmax = max(bbox1[1] + bbox1[3], bbox2[1] + bbox2[3])
+    ymax = max(bbox1[2] + bbox1[4], bbox2[2] + bbox2[4])
+    width = xmax - xmin
+    height = ymax - ymin
+    box_combined = [-1, xmin, ymin, width, height, -1]
+    patch_xmin, patch_ymin, patch_side = make_patch_shape_focusing_on_object(box_combined, max_dc, min_ar)
+    return patch_xmin, patch_ymin, patch_side
 
 
 def sample_patch_focusing_on_object(image, bboxes, img_side, obj_idx, max_dc, min_ar):

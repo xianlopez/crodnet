@@ -403,6 +403,11 @@ class MultiCellArch:
         self.batch_count_debug += 1
         batch_dir = os.path.join(self.debug_dir, 'batch' + str(self.batch_count_debug))
         os.makedirs(batch_dir)
+        dir_images = []
+        for img_idx in range(batch_size):
+            dir_this_image = os.path.join(batch_dir, 'img' + str(img_idx))
+            dir_images.append(dir_this_image)
+            os.makedirs(dir_this_image)
         for pos in range(self.n_boxes):
             grid_idx = self.get_grid_idx_from_flat_position(pos)
             inputs_this_box = inputs_all_sizes[grid_idx]  # (batch_size, height, width, 3)
@@ -412,9 +417,10 @@ class MultiCellArch:
             anc_xmax = anchor_coords[2]
             anc_ymax = anchor_coords[3]
             for img_idx in range(batch_size):
+                dir_img = dir_images[img_idx]
                 img = inputs_this_box[img_idx, anc_ymin:anc_ymax, anc_xmin:anc_xmax].copy()  # (receptive_field_size, receptive_field_size, 3)
                 img = tools.add_mean_again(img)
-                path_to_save = os.path.join(batch_dir, 'img' + str(img_idx) + '_pos' + str(pos) + '.png')
+                path_to_save = os.path.join(dir_img, 'pos' + str(pos) + '.png')
                 coords_enc = localizations_enc[img_idx, pos, :]  # (4)
                 coords_dec = CommonEncoding.decode_boxes_wrt_anchor_np(coords_enc, self.opts)  # (4)
                 if self.th_conf is None:
@@ -433,7 +439,7 @@ class MultiCellArch:
                         img = tools.add_bounding_boxes_to_image2(img, bbox, self.classnames, color=(127, 0, 127))
                 cv2.imwrite(path_to_save, cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_RGB2BGR))
                 # Save info file:
-                info_file_path = os.path.join(batch_dir, 'img' + str(img_idx) + '_pos' + str(pos) + '_info.txt')
+                info_file_path = os.path.join(dir_img, 'pos' + str(pos) + '_info.txt')
                 self.write_anchor_info_file(info_file_path, softmax, predicted_class, cm_pred, img_idx, pos)
         return net_output
 
