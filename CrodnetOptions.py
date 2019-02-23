@@ -6,8 +6,10 @@ class CommonOptions:
         self.predict_dc = False
         self.predict_cm = False
         self.cm_same_class = False
+        self.th_cm_background = 0.3
+        self.th_cm_neutral = 0.35
 
-        self.lcr = 512  # Length of Common Representation
+        self.lcr = 256  # Length of Common Representation
 
         self.encoding_method = 'ssd'
         self.enc_epsilon = 1e-5

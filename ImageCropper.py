@@ -87,9 +87,9 @@ class ImageCropper:
 
     def keep_one_box_and_resize(self, patch, remaining_boxes):
         # patch: (patch_side_abs, patch_side_abs, 3)
-        # remaining_boxes: (n_remaining_boxes, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
+        # remaining_boxes: (n_remaining_boxes, 9) [class_id, xmin, ymin, width, height, percent_contained, gt_idx, c_x_unclipped, c_y_unclipped]
         # Encode the labels (and keep only one box):
-        label_enc = self.single_cell_arch.encode_gt_from_array(remaining_boxes)  # (9)
+        label_enc = self.single_cell_arch.encode_gt_from_array(remaining_boxes)  # (n_labels)
         # Resize the crop to the size expected by the network:
         crop = cv2.resize(patch, (network.receptive_field_size, network.receptive_field_size), interpolation=1)  # (receptive_field_size, receptive_field_size, 3)
         return crop, label_enc
@@ -126,7 +126,7 @@ def sample_patch_focusing_on_pair(image, bboxes, img_side, obj1_idx, obj2_idx, m
     patch_x0_rel, patch_y0_rel, patch_side_rel = make_patch_shape_focusing_on_pair(bboxes[obj1_idx, :], bboxes[obj2_idx, :], max_dc, min_ar)
     patch, remaining_boxes = sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_side_rel)
     # patch: (patch_side_abs, patch_side_abs, 3)
-    # remaining_boxes: (n_remaining_boxes, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
+    # remaining_boxes: (n_remaining_boxes, 9) [class_id, xmin, ymin, width, height, percent_contained, gt_idx, c_x_unclipped, c_y_unclipped]
     return patch, remaining_boxes
 
 
@@ -150,7 +150,7 @@ def sample_patch_focusing_on_object(image, bboxes, img_side, obj_idx, max_dc, mi
     patch_x0_rel, patch_y0_rel, patch_side_rel = make_patch_shape_focusing_on_object(bboxes[obj_idx, :], max_dc, min_ar)
     patch, remaining_boxes = sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_side_rel)
     # patch: (patch_side_abs, patch_side_abs, 3)
-    # remaining_boxes: (n_remaining_boxes, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
+    # remaining_boxes: (n_remaining_boxes, 9) [class_id, xmin, ymin, width, height, percent_contained, gt_idx, c_x_unclipped, c_y_unclipped]
     return patch, remaining_boxes
 
 
@@ -213,7 +213,7 @@ def sample_random_patch(image, bboxes, img_side, min_scale, max_scale):
     patch_x0_rel, patch_y0_rel, patch_side_rel = make_patch_shape(img_side, min_scale, max_scale)
     patch, remaining_boxes = sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_side_rel)
     # patch: (patch_side_abs, patch_side_abs, 3)
-    # remaining_boxes: (n_remaining_boxes, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
+    # remaining_boxes: (n_remaining_boxes, 9) [class_id, xmin, ymin, width, height, percent_contained, gt_idx, c_x_unclipped, c_y_unclipped]
     return patch, remaining_boxes
 
 
@@ -246,6 +246,8 @@ def sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_side
     remaining_boxes_y0 = (remaining_boxes_on_orig_coords[:, 2] - patch_y0_rel) / patch_side_rel
     remaining_boxes_x1 = (remaining_boxes_on_orig_coords[:, 1] + remaining_boxes_on_orig_coords[:, 3] - patch_x0_rel) / patch_side_rel
     remaining_boxes_y1 = (remaining_boxes_on_orig_coords[:, 2] + remaining_boxes_on_orig_coords[:, 4] - patch_y0_rel) / patch_side_rel
+    remaining_boxes_x_center = (remaining_boxes_x0 + remaining_boxes_x1) / 2.0
+    remaining_boxes_y_center = (remaining_boxes_y0 + remaining_boxes_y1) / 2.0
     remaining_boxes_x0 = np.maximum(remaining_boxes_x0, 0)  # (n_remaining_boxes)
     remaining_boxes_y0 = np.maximum(remaining_boxes_y0, 0)  # (n_remaining_boxes)
     remaining_boxes_x1 = np.minimum(remaining_boxes_x1, 1)
@@ -256,7 +258,8 @@ def sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_side
     remaining_boxes = np.stack([remaining_boxes_class_id, remaining_boxes_x0,
                                 remaining_boxes_y0, remaining_boxes_width,
                                 remaining_boxes_height, remaining_boxes_pc,
-                                remaining_boxes_gt_idx], axis=-1)  # (n_remaining_boxes, 7)
+                                remaining_boxes_gt_idx, remaining_boxes_x_center,
+                                remaining_boxes_y_center], axis=-1)  # (n_remaining_boxes, 9)
     return patch, remaining_boxes
 
 

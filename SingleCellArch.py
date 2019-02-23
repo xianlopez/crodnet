@@ -206,12 +206,16 @@ class SingleCellArch:
         return input_shape
 
     def encode_gt_from_array(self, gt_boxes):
-        # gt_boxes: (n_gt, 7) [class_id, xmin, ymin, width, height, pc, gt_idx]
+        # gt_boxes: (n_gt, 9) [class_id, xmin, ymin, width, height, pc, gt_idx, c_x_unclipped, c_y_unclipped]
         n_gt = gt_boxes.shape[0]
         if n_gt > 0:
             gt_coords = gt_boxes[:, 1:5]  # (n_gt, 4)
             gt_class_ids = gt_boxes[:, 0]  # (n_gt)
             gt_pc_incoming = gt_boxes[:, 5]  # (n_gt)
+
+            c_x_unclipped = gt_boxes[:, 7]
+            c_y_unclipped = gt_boxes[:, 8]
+            dc_unclipped = compute_dc_unclipped(c_x_unclipped, c_y_unclipped)  # (n_gt)
 
             ar, dc = compute_ar_dc(gt_coords)  # All variables have shape (n_gt)
             pc = gt_pc_incoming  # (n_gt)
@@ -270,28 +274,28 @@ class SingleCellArch:
                 mask_ar_and_class = np.logical_and(mask_ar, mask_class)
                 n_fitting = np.sum(mask_ar_and_class.astype(np.int32))  # ()
                 if n_fitting > 1:
-                    dc_masked_by_ar_and_class = \
-                        np.where(mask_ar_and_class, dc, np.infty * np.ones(shape=(n_gt), dtype=np.float32) ) # (n_gt)
-                    dc_masked_by_ar_and_class.sort()
-                    if dc_masked_by_ar_and_class[0] < 0 or dc_masked_by_ar_and_class[0] > np.sqrt(2):
-                        raise Exception('dc_masked_by_ar_and_class[0] = ' + str(dc_masked_by_ar_and_class[0]))
-                    if dc_masked_by_ar_and_class[1] < 0 or dc_masked_by_ar_and_class[1] > np.sqrt(2):
-                        raise Exception('dc_masked_by_ar_and_class[1] = ' + str(dc_masked_by_ar_and_class[1]))
-                    cm = (dc_masked_by_ar_and_class[1] - dc_masked_by_ar_and_class[0]) / np.sqrt(2)
+                    dc_unc_masked_by_ar_and_class = \
+                        np.where(mask_ar_and_class, dc_unclipped, np.infty * np.ones(shape=(n_gt), dtype=np.float32) ) # (n_gt)
+                    dc_unc_masked_by_ar_and_class.sort()
+                    if dc_unc_masked_by_ar_and_class[0] < 0 or dc_unc_masked_by_ar_and_class[0] > np.sqrt(2):
+                        raise Exception('dc_unc_masked_by_ar_and_class[0] = ' + str(dc_unc_masked_by_ar_and_class[0]))
+                    if dc_unc_masked_by_ar_and_class[1] < 0 or dc_unc_masked_by_ar_and_class[1] > np.sqrt(2):
+                        raise Exception('dc_unc_masked_by_ar_and_class[1] = ' + str(dc_unc_masked_by_ar_and_class[1]))
+                    cm = (np.sqrt(dc_unc_masked_by_ar_and_class[1]) - np.sqrt(dc_unc_masked_by_ar_and_class[0])) / np.sqrt(np.sqrt(2))
                 else:
                     cm = 1
             else:
-                dc_masked_by_ar = np.where(mask_ar, dc, np.infty * np.ones(shape=(n_gt), dtype=np.float32) ) # (n_gt)
+                dc_unc_masked_by_ar = np.where(mask_ar, dc_unclipped, np.infty * np.ones(shape=(n_gt), dtype=np.float32) ) # (n_gt)
                 # indices_sort = np.argsort(dc_masked_by_ar)
                 # dc_masked_by_ar = dc_masked_by_ar[indices_sort]
-                dc_masked_by_ar.sort()
+                dc_unc_masked_by_ar.sort()
                 n_fitting_ar = np.sum(mask_ar.astype(np.int32))  # ()
                 if n_fitting_ar > 1:
-                    if dc_masked_by_ar[0] < 0 or dc_masked_by_ar[0] > np.sqrt(2):
-                        raise Exception('dc_masked_by_ar[0] = ' + str(dc_masked_by_ar[0]))
-                    if dc_masked_by_ar[1] < 0 or dc_masked_by_ar[1] > np.sqrt(2):
-                        raise Exception('dc_masked_by_ar[1] = ' + str(dc_masked_by_ar[1]))
-                    cm = (dc_masked_by_ar[1] - dc_masked_by_ar[0]) / np.sqrt(2)
+                    if dc_unc_masked_by_ar[0] < 0 or dc_unc_masked_by_ar[0] > np.sqrt(2):
+                        raise Exception('dc_unc_masked_by_ar[0] = ' + str(dc_unc_masked_by_ar[0]))
+                    if dc_unc_masked_by_ar[1] < 0 or dc_unc_masked_by_ar[1] > np.sqrt(2):
+                        raise Exception('dc_unc_masked_by_ar[1] = ' + str(dc_unc_masked_by_ar[1]))
+                    cm = (np.sqrt(dc_unc_masked_by_ar[1]) - np.sqrt(dc_unc_masked_by_ar[0])) / np.sqrt(np.sqrt(2))
                 else:
                     cm = 1
 
@@ -301,6 +305,15 @@ class SingleCellArch:
             pc_enc = CommonEncoding.encode_pc_or_dc_np(pc_associated)
             dc_enc = CommonEncoding.encode_pc_or_dc_np(dc_associated)
             cm_enc = CommonEncoding.encode_cm_np(cm)
+
+            # Switch to background or neutral if CM is too low:
+            if cm < self.opts.th_cm_background:
+                any_match = np.zeros(shape=(), dtype=np.bool)
+                is_neutral = np.zeros(shape=(), dtype=np.bool)
+                class_id = float(self.background_id)
+            elif cm < self.opts.th_cm_neutral and not is_negative:
+                any_match = np.zeros(shape=(), dtype=np.bool)
+                is_neutral = np.ones(shape=(), dtype=np.bool)
 
             # Put all together in one array:
             labels_enc = np.stack([any_match.astype(np.float32),
@@ -878,6 +891,17 @@ def simplify_batch_dimensions(x):
     new_shape = tf.concat([batch_size, right_dimensions], axis=0)
     x_reord = tf.reshape(x, shape=new_shape)
     return x_reord
+
+
+def compute_dc_unclipped(x_c_unclipped, y_c_unclipped):
+    # x_c_unclipped (n_gt)
+    # y_c_unclipped (n_gt)
+    # Coordinates are relative (between 0 and 1)
+    rel_distance_x = 1 - 2 * x_c_unclipped
+    rel_distance_y = 1 - 2 * y_c_unclipped
+    dc_unclipped = np.sqrt(np.square(rel_distance_x) + np.square(rel_distance_y))  # (n_gt)
+    dc_unclipped = np.minimum(dc_unclipped, np.sqrt(2.0))
+    return dc_unclipped
 
 
 def compute_ar_dc(gt_boxes):
