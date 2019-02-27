@@ -79,6 +79,8 @@ class MultiCellEnv:
                                   images_dir, self.opts.write_results, step)
                 all_gt_boxes.extend(batch_gt_boxes)
                 all_pred_boxes.extend(batch_pred_boxes)
+            precision, recall = compute_precision_recall_on_threshold(all_pred_boxes, all_gt_boxes, self.opts.th_conf)
+            logging.info('Confidence threshold: ' + str(self.opts.th_conf) + '. Precision: ' + str(precision) + '  -  recall: ' + str(recall))
             mAP = mean_ap.compute_mAP(all_pred_boxes, all_gt_boxes, self.classnames, self.opts)
             logging.info('Mean Average Precision: ' + str(mAP))
             fintime = time.time()
@@ -271,16 +273,51 @@ def non_maximum_suppression_batched(batch_boxes, threshold_nms):
 def non_maximum_suppression(boxes, threshold_nms):
     # boxes: List with all the predicted bounding boxes in the image.
     nboxes = len(boxes)
-    boxes.sort(key=operator.attrgetter('confidence'), reverse=True)
+    boxes.sort(key=operator.attrgetter('confidence'))
     for i in range(nboxes):
-        if boxes[i].confidence != -np.inf:
-            for j in range(i + 1, nboxes):
-                if boxes[j].confidence != -np.inf:
-                    if tools.compute_iou(boxes[i].get_coords(), boxes[j].get_coords()) > threshold_nms:
-                        assert boxes[i].confidence >= boxes[j].confidence, 'Suppressing boxes in reverse order in NMS'
-                        boxes[j].confidence = -np.inf
+        for j in range(i + 1, nboxes):
+            if boxes[j].confidence != -np.inf and np.abs(boxes[i].classid - boxes[j].classid) < 0.5:
+                if tools.compute_iou(boxes[i].get_coords(), boxes[j].get_coords()) > threshold_nms:
+                    assert boxes[i].confidence <= boxes[j].confidence, 'Suppressing boxes in reverse order in NMS'
+                    boxes[i].confidence = -np.inf
+                    break
     remaining_boxes = [x for x in boxes if x.confidence != -np.inf]
     return remaining_boxes
+
+
+# This function must be called after marking the true and false positives.
+def compute_precision_recall_on_threshold(pred_boxes, gt_boxes, th_conf):
+    # pred_boxes (nimages) List with the predicted bounding boxes of each image.
+    # gt_boxes (nimages) List with the ground truth boxes of each image.
+    nimages = len(pred_boxes)
+    TP = 0
+    FP = 0
+    FN = 0
+    for img_idx in range(nimages):
+        preds_image = pred_boxes[img_idx]
+        gt_image = gt_boxes[img_idx]
+        preds_over_th = [box for box in preds_image if box.confidence >= th_conf]
+        TP_image = 0
+        for box in preds_over_th:
+            if box.tp == 'yes':
+                TP_image += 1
+            elif box.tp == 'no':
+                FP += 1
+            else:
+                raise Exception('Prediction not determined as TP or FP.')
+        TP += TP_image
+        n_gt = len(gt_image)
+        FN += n_gt - TP_image
+    if TP + FP > 0:
+        precision = float(TP) / (TP + FP)
+    else:
+        precision = 0
+    if TP + FN > 0:
+        recall = float(TP) / (TP + FN)
+    else:
+        recall = 0
+    return precision, recall
+
 
 
 def write_results(images, pred_boxes, gt_boxes, filenames, classnames, images_dir, write_results, batch_count):
@@ -313,7 +350,6 @@ def draw_result(img, pred_boxes, gt_boxes, classnames):
         cv2.rectangle(img, (xmin, ymin), (xmin + w, ymin + h), (0, 0, 255), 2)
     # Draw predictions:
     for box in pred_boxes:
-        box.print()
         conf = box.confidence
         [xmin, ymin, w, h] = box.get_abs_coords_cv(img)
         classid = int(box.classid)
