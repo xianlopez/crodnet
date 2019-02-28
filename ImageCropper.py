@@ -8,12 +8,12 @@ class ImageCropperOptions:
         self.padding_factor = 0.25
         self.min_side_scale = 0.05
         self.max_side_scale = 0.7
-        self.max_dc = 0.5
+        self.max_dc = 0.2
         self.min_ar = 0.05
-        self.probability_random = 0.25
-        self.max_dc_pair = 0.5
+        self.probability_random = 0.5
+        self.max_dc_pair = 0.3
         self.min_ar_pair = 0.2
-        self.probability_pair = 0.3
+        self.probability_pair = 0.1
 
 
 class ImageCropper:
