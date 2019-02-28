@@ -71,6 +71,14 @@ class SingleCellArch:
 
         return net_output, loss, metrics
 
+    def print_info(self):
+        min_area = int(np.round(self.opts.threshold_ar_low * network.receptive_field_size * network.receptive_field_size))
+        min_side = int(np.round(np.sqrt(min_area)))
+        max_area = int(np.round(self.opts.threshold_ar_high * network.receptive_field_size * network.receptive_field_size))
+        max_side = int(np.round(np.sqrt(max_area)))
+        print('Min area to detect: ' + str(min_area) + ' (' + str(min_side) + ' x ' + str(min_side) + ')')
+        print('Min area to detect: ' + str(max_area) + ' (' + str(max_side) + ' x ' + str(max_side) + ')')
+
     def make_comparisons(self, common_representation, labels_enc_reord):
         # common_representation: (batch_size, lcr)
         # labels_enc_reord: (batch_size, n_labels)

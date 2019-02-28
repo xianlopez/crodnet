@@ -164,7 +164,15 @@ class MultiCellArch:
             print('Number of boxes: ' + str(grid.n_boxes))
             print('Start position in flat representation: ' + str(grid.flat_start_pos))
             # min_object_area = int(np.round(self.input_image_size_w_pad * np.sqrt(self.opts.threshold_ar_low) * grid.rel_box_size))
+            # max_object_area = int(np.round(self.input_image_size_w_pad * np.sqrt(self.opts.threshold_ar_high) * grid.rel_box_size))
             # print('Minimum object size that this grid can detect: ' + str(min_object_area) + 'x' + str(min_object_area))
+            # print('Maximum object size that this grid can detect: ' + str(max_object_area) + 'x' + str(max_object_area))
+            anchor_ar = network.receptive_field_size * network.receptive_field_size / float(grid.input_size * grid.input_size)
+            print('Anchor area ratio: ' + str(anchor_ar))
+            min_object_rel_side = np.sqrt(anchor_ar * self.opts.threshold_ar_low)
+            max_object_rel_side = np.sqrt(anchor_ar * self.opts.threshold_ar_high)
+            print('Minimum object relative side to detect: ' + str(min_object_rel_side))
+            print('Maximum object relative side to detect: ' + str(max_object_rel_side))
             if i < len(self.grid_levels) - 1:
                 print('Area ratio with next grid level: ' +
                       str(float(self.grid_levels[i + 1].rel_box_size * self.grid_levels[i + 1].rel_box_size) /
