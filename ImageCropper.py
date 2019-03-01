@@ -42,7 +42,7 @@ class ImageCropper:
         # image: (sq_side, sq_side, 3)
         sq_side, width, _ = image.shape
         assert sq_side == width, 'Image is not square in pad_image.'
-        padded_side = sq_side * (1 + 2 * self.opts.padding_factor)
+        padded_side = int(np.round(sq_side * (1 + 2 * self.opts.padding_factor)))
         increment_top = int(np.round((padded_side - sq_side) / 2))
         increment_bottom = int(padded_side - sq_side - increment_top)
         increment_left = int(np.round((padded_side - sq_side) / 2))
