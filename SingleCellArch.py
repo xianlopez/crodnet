@@ -365,6 +365,42 @@ class SingleCellArch:
                 fid.write('cm_gt = ' + str(cm_gt[idx]) + '\n')
                 fid.write('cm_pred = ' + str(cm_pred[idx]) + '\n')
 
+    def draw_dc_circle(self, img):
+        height, width, _ = img.shape
+        assert width == height, 'Different width and height drawing circle.'
+        center = int(np.round(width / 2.0))
+        center = (center, center)
+        # Main circle:
+        radius = int(np.round(self.opts.threshold_dc * width / 2.0))
+        color = (255, 0, 0)
+        thickness = 2
+        cv2.circle(img, center, radius, color, thickness)
+        # Neutrality circle
+        radius = int(np.round(self.opts.threshold_dc_neutral * width / 2.0))
+        color = (127, 127, 0)
+        thickness = 2
+        cv2.circle(img, center, radius, color, thickness)
+        # Maxium AR box:
+        color = (0, 0, 255)
+        thickness = 2
+        area = self.opts.threshold_ar_high * height * width
+        side = np.sqrt(area)
+        xmin = int(np.round(height / 2.0 - side / 2.0))
+        ymin = xmin
+        xmax = int(np.round(height / 2.0 + side / 2.0))
+        ymax = xmax
+        cv2.rectangle(img, (xmin, ymin), (xmax, ymax), color, thickness)
+        # Minimum AR box:
+        color = (0, 0, 255)
+        thickness = 2
+        area = self.opts.threshold_ar_low * height * width
+        side = np.sqrt(area)
+        xmin = int(np.round(height / 2.0 - side / 2.0))
+        ymin = xmin
+        xmax = int(np.round(height / 2.0 + side / 2.0))
+        ymax = xmax
+        cv2.rectangle(img, (xmin, ymin), (xmax, ymax), color, thickness)
+
     def write_train_debug_info(self, metrics, inputs_reord, labels_enc_reord, net_output, comparisons_pred, comps_validity_labels, comparisons_indices, filenames):
         # inputs_reord: (batch_size, input_image_size, input_image_size, 3)
         # labels_enc_reord: (batch_size, n_labels)
@@ -409,6 +445,7 @@ class SingleCellArch:
             try:
                 crop = inputs_reord[i, ...]  # (input_image_size, input_image_size, 3)
                 crop = tools.add_mean_again(crop)
+                self.draw_dc_circle(crop)
                 label_enc = labels_enc_reord[i, :]
                 gt_class = int(gt_encoding.get_class_id(label_enc))
                 gt_coords_enc = gt_encoding.get_coords_enc(label_enc)
@@ -595,6 +632,7 @@ class SingleCellArch:
             try:
                 crop = inputs_reord[i, ...]  # (input_image_size, input_image_size, 3)
                 crop = tools.add_mean_again(crop)
+                self.draw_dc_circle(crop)
                 label_enc = labels_enc_reord[i, :]
                 gt_class = int(gt_encoding.get_class_id(label_enc))
                 is_match = mask_match[i]
@@ -792,7 +830,6 @@ def comparison_loss_and_metric(comparisons_pred, comps_validity_labels, comp_los
         loss_orig = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=comparisons_labels_int,
                                                                    logits=comparisons_pred, name='loss_orig')  # (total_comparisons)
         zeros = tf.zeros_like(comparisons_validity, dtype=tf.float32)  # (total_comparisons)
-        # TODO: Here we are supressing every case in which there is a neutral crop. If it is an inter-comparison, that's not necessary.
         loss_on_valids = tf.where(comparisons_validity, loss_orig, zeros, name='loss_match')  # (total_comparisons)
         n_valids = tf.reduce_sum(tf.cast(comparisons_validity, tf.float32))  # ()
         n_valids_safe = tf.maximum(n_valids, 1)  # ()

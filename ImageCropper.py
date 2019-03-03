@@ -10,6 +10,7 @@ class ImageCropperOptions:
         self.max_side_scale = 0.7
         self.max_dc = 0.2
         self.min_ar = 0.05
+        self.max_ar = 0.5
         self.probability_random = 0.5
         self.max_dc_pair = 0.3
         self.min_ar_pair = 0.2
@@ -62,7 +63,7 @@ class ImageCropper:
     def crop_only_random(self, image, bboxes, img_side):
         # image: (img_side, img_side, 3)
         # bboxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
-        patch, remaining_boxes = sample_random_patch(image, bboxes, img_side, self.opts.min_side_scale, self.opts.max_side_scale)
+        patch, remaining_boxes = sample_random_patch(image, bboxes, img_side, self.opts.min_side_scale, self.opts.max_side_scale, self.opts.padding_factor)
         crop, label_enc = self.keep_one_box_and_resize(patch, remaining_boxes)
         return crop, label_enc
 
@@ -72,7 +73,7 @@ class ImageCropper:
         n_gt = bboxes.shape[0]
         rnd1 = np.random.rand()
         if rnd1 < self.opts.probability_random or n_gt == 0:
-            patch, remaining_boxes = sample_random_patch(image, bboxes, img_side, self.opts.min_side_scale, self.opts.max_side_scale)
+            patch, remaining_boxes = sample_random_patch(image, bboxes, img_side, self.opts.min_side_scale, self.opts.max_side_scale, self.opts.padding_factor)
         elif rnd1 < self.opts.probability_random + self.opts.probability_pair and n_gt >= 2:
             box_idx1 = np.random.randint(0, n_gt)
             difference = np.random.randint(1, n_gt)
@@ -81,7 +82,7 @@ class ImageCropper:
             patch, remaining_boxes = sample_patch_focusing_on_pair(image, bboxes, img_side, box_idx1, box_idx2, self.opts.max_dc_pair, self.opts.min_ar_pair)
         else:
             box_idx = np.random.randint(0, n_gt)
-            patch, remaining_boxes = sample_patch_focusing_on_object(image, bboxes, img_side, box_idx, self.opts.max_dc, self.opts.min_ar)
+            patch, remaining_boxes = sample_patch_focusing_on_object(image, bboxes, img_side, box_idx, self.opts.max_dc, self.opts.min_ar, self.opts.max_ar)
         crop, label_enc = self.keep_one_box_and_resize(patch, remaining_boxes)
         return crop, label_enc
 
@@ -144,17 +145,17 @@ def make_patch_shape_focusing_on_pair(bbox1, bbox2, max_dc, min_ar):
     return patch_xmin, patch_ymin, patch_side
 
 
-def sample_patch_focusing_on_object(image, bboxes, img_side, obj_idx, max_dc, min_ar):
+def sample_patch_focusing_on_object(image, bboxes, img_side, obj_idx, max_dc, min_ar, max_ar):
     # image: (img_side, img_side, 3)
     # bboxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
-    patch_x0_rel, patch_y0_rel, patch_side_rel = make_patch_shape_focusing_on_object(bboxes[obj_idx, :], max_dc, min_ar)
+    patch_x0_rel, patch_y0_rel, patch_side_rel = make_patch_shape_focusing_on_object(bboxes[obj_idx, :], max_dc, min_ar, max_ar)
     patch, remaining_boxes = sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_side_rel)
     # patch: (patch_side_abs, patch_side_abs, 3)
     # remaining_boxes: (n_remaining_boxes, 9) [class_id, xmin, ymin, width, height, percent_contained, gt_idx, c_x_unclipped, c_y_unclipped]
     return patch, remaining_boxes
 
 
-def make_patch_shape_focusing_on_object(bbox, max_dc, min_ar):
+def make_patch_shape_focusing_on_object(bbox, max_dc, min_ar, max_ar=1.0):
     # bbox: (6) [class_id, xmin, ymin, width, height, percent_contained]
     # Everything is in relative coordinates.
     # Coordinates of the square box containing the GT box:
@@ -184,11 +185,14 @@ def make_patch_shape_focusing_on_object(bbox, max_dc, min_ar):
     max_patch_side = min(max_width, max_height)
 
     # Limit the patch side using the Area Ratio constrain:
-    max_path_side_by_ar = box_sq_side / np.sqrt(min_ar)
-    max_patch_side = min(max_patch_side, max_path_side_by_ar)
+    max_patch_side_by_ar = box_sq_side / np.sqrt(min_ar)
+    max_patch_side = min(max_patch_side, max_patch_side_by_ar)
+    min_patch_side = box_sq_side / np.sqrt(max_ar)
+    min_patch_side = min(min_patch_side, max_patch_side)
+    assert min_patch_side <= max_patch_side, 'min_patch_side > max_patch_side'
 
     # Sample patch side:
-    patch_side = box_sq_side + np.random.rand() * (max_patch_side - box_sq_side)
+    patch_side = min_patch_side + np.random.rand() * (max_patch_side - min_patch_side)
 
     # Patch center:
     dc_max_side = max_dc / np.sqrt(2)
@@ -207,10 +211,10 @@ def make_patch_shape_focusing_on_object(bbox, max_dc, min_ar):
     return patch_xmin, patch_ymin, patch_side
 
 
-def sample_random_patch(image, bboxes, img_side, min_scale, max_scale):
+def sample_random_patch(image, bboxes, img_side, min_scale, max_scale, padding_factor):
     # image: (img_side, img_side, 3)
     # bboxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
-    patch_x0_rel, patch_y0_rel, patch_side_rel = make_patch_shape(img_side, min_scale, max_scale)
+    patch_x0_rel, patch_y0_rel, patch_side_rel = make_patch_shape(min_scale, max_scale, padding_factor)
     patch, remaining_boxes = sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_side_rel)
     # patch: (patch_side_abs, patch_side_abs, 3)
     # remaining_boxes: (n_remaining_boxes, 9) [class_id, xmin, ymin, width, height, percent_contained, gt_idx, c_x_unclipped, c_y_unclipped]
@@ -299,16 +303,22 @@ def compute_pc(gt_boxes, patch):
     return pc
 
 
-def make_patch_shape(img_side, min_scale, max_scale):
+def make_patch_shape(min_scale, max_scale, padding_factor):
+    orig_side_rel = 1.0 / (1 + 2 * padding_factor)
+    margin_rel = padding_factor * orig_side_rel
+    assert np.abs(orig_side_rel + 2 * margin_rel - 1) < 1e-6, 'Error computing margin'
     scale = np.random.rand() * (max_scale - min_scale) + min_scale
-    patch_side = scale * img_side
-    patch_side = np.minimum(np.maximum(np.round(patch_side), 1), img_side).astype(np.int32)
-    x0 = np.random.randint(img_side - patch_side + 1)
-    y0 = np.random.randint(img_side - patch_side + 1)
-    # Convert to relative coordinates:
-    x0 = x0 / float(img_side)
-    y0 = y0 / float(img_side)
-    patch_side = patch_side / float(img_side)
+    patch_side = scale
+    min_c = max(margin_rel, scale / 2.0)
+    max_c = min(1.0 - margin_rel, 1 - scale / 2.0)
+    xc = np.random.rand() * (max_c - min_c) + min_c
+    yc = np.random.rand() * (max_c - min_c) + min_c
+    x0 = xc - scale / 2.0
+    y0 = yc - scale / 2.0
+    assert xc > margin_rel, 'xc <= margin_rel'
+    assert xc < 1 - margin_rel, 'xc >= 1 - margin_rel'
+    assert yc > margin_rel, 'yc <= margin_rel'
+    assert yc < 1 - margin_rel, 'yc >= 1 - margin_rel'
     return x0, y0, patch_side
 
 
