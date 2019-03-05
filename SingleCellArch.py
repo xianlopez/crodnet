@@ -36,6 +36,9 @@ class SingleCellArch:
         self.proportion_same_comparisons = 0
         self.batch_count_train_debug = 0
         self.batch_count_eval_debug = 0
+        self.n_matches = 0
+        self.n_neutrals = 0
+        self.n_backgrounds = 0
 
     def set_classnames(self, classnames):
         print('Setting classnames')
@@ -639,10 +642,15 @@ class SingleCellArch:
                 is_neutral = mask_neutral[i]
                 predicted_class = np.argmax(logits[i, :])
                 if is_neutral:
+                    self.n_neutrals += 1
                     file_name = 'batch' + str(self.batch_count_eval_debug) + '_' + name + '_crop' + str(i) + '_NEUTRAL_PRED-' + \
                                 self.classnames[predicted_class] + '.png'
                     crop_dir = self.neutral_dir
                 else:
+                    if gt_class == self.background_id:
+                        self.n_backgrounds += 1
+                    else:
+                        self.n_matches += 1
                     file_name = 'batch' + str(self.batch_count_eval_debug) + '_' + name + '_crop' + str(i) + '_GT-' + \
                                 self.classnames[gt_class] + '_PRED-' + self.classnames[predicted_class] + '.png'
                     if gt_class == predicted_class:
@@ -674,6 +682,11 @@ class SingleCellArch:
             except:
                 print('Error with image ' + name)
                 raise
+
+        total_crops = self.n_matches + self.n_backgrounds + self.n_neutrals
+        print('n_matches: ' + str(self.n_matches) + ' (' + str(np.round(float(self.n_matches) / total_crops * 100.0, 2)) + '%)')
+        print('n_backgrounds: ' + str(self.n_backgrounds) + ' (' + str(np.round(float(self.n_backgrounds) / total_crops * 100.0, 2)) + '%)')
+        print('n_neutrals: ' + str(self.n_neutrals) + ' (' + str(np.round(float(self.n_neutrals) / total_crops * 100.0, 2)) + '%)')
 
         # Comparisons:
         valid_comps = comps_validity_labels[:, 0]  # (total_comparisons)
