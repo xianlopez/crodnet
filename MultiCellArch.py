@@ -262,8 +262,6 @@ class MultiCellArch:
         # Coordinates wrt to anchor:
         coords_dec_wrt_anchor = CommonEncoding.decode_boxes_wrt_anchor_tf(coords_enc, self.opts)  # (batch_size, nboxes, 4) [xmin, ymin, width, height]
 
-        coords_dec_wrt_anchor = tf.Print(coords_dec_wrt_anchor, [coords_dec_wrt_anchor[0, 468, :]], 'coords_dec_wrt_anchor')
-
         # From coordinates wrt anchor to coordinates wrt to grid input:
         batch_size = coords_enc.shape[0]
         anchors_xmin_wrt_input = np.zeros(shape=(self.n_boxes), dtype=np.float32)
@@ -289,11 +287,6 @@ class MultiCellArch:
         width_wrt_input = coords_dec_wrt_anchor[..., 2] * anchors_width_wrt_input_ext  # (batch_size, nboxes)
         height_wrt_input = coords_dec_wrt_anchor[..., 3] * anchors_height_wrt_input_ext  # (batch_size, nboxes)
 
-        xmin_wrt_input = tf.Print(xmin_wrt_input, [xmin_wrt_input[0, 468]], 'xmin_wrt_input')
-        ymin_wrt_input = tf.Print(ymin_wrt_input, [ymin_wrt_input[0, 468]], 'ymin_wrt_input')
-        width_wrt_input = tf.Print(width_wrt_input, [width_wrt_input[0, 468]], 'width_wrt_input')
-        height_wrt_input = tf.Print(height_wrt_input, [height_wrt_input[0, 468]], 'height_wrt_input')
-
         # From coordinates wrt input to coordinates wrt original image:
         pad_rel = np.zeros(shape=(self.n_boxes), dtype=np.float32)
         for pos in range(self.n_boxes):
@@ -309,8 +302,6 @@ class MultiCellArch:
 
         # Pack together:
         coords_dec = tf.stack([xmin_wrt_orig, ymin_wrt_orig, width_wrt_orig, height_wrt_orig], axis=-1)  # (batch_size, nboxes, 4) [xmin, ymin, width, height]
-
-        coords_dec = tf.Print(coords_dec, [coords_dec[0, 468, :]], 'coords_dec')
 
         return coords_dec  # (batch_size, nboxes, 4) [xmin, ymin, width, height]
 
