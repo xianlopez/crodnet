@@ -75,8 +75,7 @@ class MultiCellEnv:
                 batch_pred_boxes = mark_true_false_positives(batch_pred_boxes, batch_gt_boxes, self.opts.threshold_iou)
                 if self.opts.write_results:
                     boxes_to_show = self.apply_detection_filter(batch_pred_boxes)
-                    write_results(batch_images, boxes_to_show, batch_gt_boxes, batch_filenames, self.classnames,
-                                  images_dir, self.opts.write_results, step)
+                    write_results(batch_images, boxes_to_show, batch_gt_boxes, batch_filenames, self.classnames, images_dir, step)
                 all_gt_boxes.extend(batch_gt_boxes)
                 all_pred_boxes.extend(batch_pred_boxes)
             precision, recall = compute_precision_recall_on_threshold(all_pred_boxes, all_gt_boxes, self.opts.th_conf)
@@ -320,7 +319,7 @@ def compute_precision_recall_on_threshold(pred_boxes, gt_boxes, th_conf):
 
 
 
-def write_results(images, pred_boxes, gt_boxes, filenames, classnames, images_dir, write_results, batch_count):
+def write_results(images, pred_boxes, gt_boxes, filenames, classnames, images_dir, batch_count):
     # images: List of length batch_size, with elements (input_width, input_height, 3)
     # pred_boxes: List of length batch_size, with lists of PredictedBox objects.
     # gt_boxes: List of length batch_size, with lists of BoundingBox objects.
@@ -334,11 +333,30 @@ def write_results(images, pred_boxes, gt_boxes, filenames, classnames, images_di
         this_gt = gt_boxes[img_idx]
         name = filenames[img_idx]
         file_name = 'img' + str(img_idx) + '_' + name
-        if write_results:
-            file_name = 'batch' + str(batch_count) + '_' + file_name
+        file_name = 'batch' + str(batch_count) + '_' + file_name
         dst_path = os.path.join(images_dir, file_name + '.png')
         draw_result(img, this_preds, this_gt, classnames)
         cv2.imwrite(dst_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
+        info_file_path = os.path.join(images_dir, file_name + '_info.txt')
+        write_result_info(this_preds, img, info_file_path, classnames)
+
+
+def write_result_info(pred_boxes, img, info_file_path, classnames):
+    # pred_boxes: List of  PredictedBox objects.
+    with open(info_file_path, 'w') as fid:
+        height, width, _ = img.shape
+        fid.write('[height, width] = ' + str([height, width]) + '\n')
+        for box in pred_boxes:
+            conf = box.confidence
+            [xmin, ymin, w, h] = box.get_abs_coords_cv(img)
+            classid = int(box.classid)
+            anc_idx = box.anc_idx
+            fid.write('\n')
+            fid.write('Box from anchor ' + str(anc_idx) + '\n')
+            fid.write('[xmin, ymin, w, h]: ' + str([xmin, ymin, w, h]) + '\n')
+            fid.write('classid = ' + str(classid) + ' (' + classnames[classid] + ')\n')
+            fid.write('conf = ' + str(conf) + '\n')
+            fid.write('tp = ' + str(box.tp) + '\n')
 
 
 def draw_result(img, pred_boxes, gt_boxes, classnames):

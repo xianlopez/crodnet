@@ -25,9 +25,6 @@ class MultiCellArch:
         for size_pad in self.opts.grid_levels_size_pad:
             self.input_image_size = max(self.input_image_size, size_pad[0])
         self.n_boxes = -1
-        self.max_pad_rel = -1
-        self.max_pad_abs = -1
-        self.input_image_size_w_pad = -1
         self.expected_n_boxes = self.get_expected_num_boxes()
         self.n_comparisons = -1
         self.metric_names = ['mAP']
@@ -64,7 +61,7 @@ class MultiCellArch:
     def compute_anchors_coordinates(self):
         self.anchors_coordinates = np.zeros(shape=(self.n_boxes, 4), dtype=np.float32)
         for pos in range(self.n_boxes):
-            xmin, ymin, xmax, ymax = self.get_anchor_coords_wrt_padded(pos)
+            xmin, ymin, xmax, ymax = self.get_anchor_coords_wrt_orig(pos)
             self.anchors_coordinates[pos, 0] = xmin
             self.anchors_coordinates[pos, 1] = ymin
             self.anchors_coordinates[pos, 2] = xmax
@@ -128,7 +125,6 @@ class MultiCellArch:
             assert net_output_shape[1] == net_output_shape[2], 'Different width and height at network output'
             grid.set_output_shape(net_output_shape[1], network.receptive_field_size)
             grid.set_flat_start_pos(self.n_boxes)
-            self.max_pad_rel = max(self.max_pad_rel, grid.pad_rel)
             output_flat = tf.reshape(net_output, [-1, grid.n_boxes, n_channels_last], name='output_flat')
             cr_flat = tf.reshape(common_representation, [-1, grid.n_boxes, self.opts.lcr], name='cr_flat')
             self.n_boxes += grid.n_boxes
@@ -139,13 +135,6 @@ class MultiCellArch:
         assert self.n_boxes == self.get_expected_num_boxes(), 'Expected number of boxes differs from the real number.'
         all_outputs = tf.concat(all_outputs, axis=1, name='all_outputs')  # (batch_size, nboxes, n_channels_last)
         all_crs = tf.concat(all_crs, axis=1, name='all_crs')  # (batch_size, nboxes, lcr)
-        self.input_image_size_w_pad = int(np.ceil(float(self.input_image_size) / (1 - 2 * self.max_pad_rel)))
-        self.max_pad_abs = int(np.round(self.max_pad_rel * self.input_image_size_w_pad))
-        self.input_image_size_w_pad = self.input_image_size + 2 * self.max_pad_abs
-        print('')
-        print('Maximum relative pad: ' + str(self.max_pad_rel))
-        print('Maximum absolute pad: ' + str(self.max_pad_abs))
-        print('Input image size with pad: ' + str(self.input_image_size_w_pad))
         self.print_grids_info()
         return all_outputs, all_crs
 
@@ -163,10 +152,6 @@ class MultiCellArch:
             print('Number of boxes in each dimension: ' + str(grid.output_shape))
             print('Number of boxes: ' + str(grid.n_boxes))
             print('Start position in flat representation: ' + str(grid.flat_start_pos))
-            # min_object_area = int(np.round(self.input_image_size_w_pad * np.sqrt(self.opts.threshold_ar_low) * grid.rel_box_size))
-            # max_object_area = int(np.round(self.input_image_size_w_pad * np.sqrt(self.opts.threshold_ar_high) * grid.rel_box_size))
-            # print('Minimum object size that this grid can detect: ' + str(min_object_area) + 'x' + str(min_object_area))
-            # print('Maximum object size that this grid can detect: ' + str(max_object_area) + 'x' + str(max_object_area))
             anchor_ar = network.receptive_field_size * network.receptive_field_size / float(grid.input_size * grid.input_size)
             print('Anchor area ratio: ' + str(anchor_ar))
             min_object_rel_side = np.sqrt(anchor_ar * self.opts.threshold_ar_low)
@@ -205,7 +190,7 @@ class MultiCellArch:
         cm_enc = output_encoding.get_cm_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size, nboxes) or None
 
         # Decode
-        localizations_dec = self.decode_boxes_wrt_padded_tf(locs_enc)  # (batch_size, nboxes, 4)
+        localizations_dec = self.decode_boxes_wrt_orig_tf(locs_enc)  # (batch_size, nboxes, 4)
         softmax = tf.nn.softmax(logits, axis=-1)  # (batch_size, nboxes, nclasses)
         if self.opts.predict_pc:
             pc = CommonEncoding.decode_pc_or_dc_tf(pc_enc)
@@ -258,127 +243,78 @@ class MultiCellArch:
         return xmin, ymin, xmax, ymax
 
     # With respect to padded image.
-    def get_anchor_coords_wrt_padded(self, position, make_absolute=False):
+    def get_anchor_coords_wrt_orig(self, position):
         # print('get_anchor_coords_wrt_padded')
         grid_idx = self.get_grid_idx_from_flat_position(position)
         grid = self.grid_levels[grid_idx]
-        # Relative coordinates:
+        # Relative coordinates with respect to input:
         xmin, ymin, xmax, ymax = self.get_anchor_coords_wrt_its_input(position, make_absolute=False)
-        # print('anchor_coords_wrt_its_input = ' + str([xmin, ymin, xmax, ymax]))
-        # Take into account padding:
-        pad_dif = self.max_pad_rel - grid.pad_rel
-        xmin = pad_dif + xmin * (1 - 2 * pad_dif)
-        ymin = pad_dif + ymin * (1 - 2 * pad_dif)
-        xmax = pad_dif + xmax * (1 - 2 * pad_dif)
-        ymax = pad_dif + ymax * (1 - 2 * pad_dif)
-        if make_absolute:
-            xmin = max(int(np.round(xmin * self.input_image_size_w_pad)), 0)
-            ymin = max(int(np.round(ymin * self.input_image_size_w_pad)), 0)
-            xmax = min(int(np.round(xmax * self.input_image_size_w_pad)), self.input_image_size_w_pad)
-            ymax = min(int(np.round(ymax * self.input_image_size_w_pad)), self.input_image_size_w_pad)
+        # Relative coordinates with respect to original image:
+        xmin = (xmin - grid.pad_rel) / (1 - grid.pad_rel)
+        ymin = (ymin - grid.pad_rel) / (1 - grid.pad_rel)
+        xmax = (xmax - grid.pad_rel) / (1 - grid.pad_rel)
+        ymax = (ymax - grid.pad_rel) / (1 - grid.pad_rel)
         return xmin, ymin, xmax, ymax
 
-    def decode_boxes_wrt_padded_tf(self, coords_enc):
-        # coords_enc: (..., 4)
-        dcx_enc = coords_enc[..., 0]
-        dcy_enc = coords_enc[..., 1]
-        w_enc = coords_enc[..., 2]
-        h_enc = coords_enc[..., 3]
+    def decode_boxes_wrt_orig_tf(self, coords_enc):
+        # coords_enc: (batch_size, nboxes, 4)
 
-        # Decoding step:
-        dcx_rel, dcy_rel, w_rel, h_rel = CommonEncoding.decoding_split_tf(dcx_enc, dcy_enc, w_enc, h_enc, self.opts)
+        # Coordinates wrt to anchor:
+        coords_dec_wrt_anchor = CommonEncoding.decode_boxes_wrt_anchor_tf(coords_enc, self.opts)  # (batch_size, nboxes, 4) [xmin, ymin, width, height]
 
-        xc = self.anchors_xc - dcx_rel * (self.anchors_w * 0.5)  # (nboxes)
-        yc = self.anchors_yc - dcy_rel * (self.anchors_h * 0.5)  # (nboxes)
+        coords_dec_wrt_anchor = tf.Print(coords_dec_wrt_anchor, [coords_dec_wrt_anchor[0, 468, :]], 'coords_dec_wrt_anchor')
 
-        width = self.anchors_w * w_rel  # (nboxes)
-        height = self.anchors_h * h_rel  # (nboxes)
+        # From coordinates wrt anchor to coordinates wrt to grid input:
+        batch_size = coords_enc.shape[0]
+        anchors_xmin_wrt_input = np.zeros(shape=(self.n_boxes), dtype=np.float32)
+        anchors_ymin_wrt_input = np.zeros(shape=(self.n_boxes), dtype=np.float32)
+        anchors_width_wrt_input = np.zeros(shape=(self.n_boxes), dtype=np.float32)
+        anchors_height_wrt_input = np.zeros(shape=(self.n_boxes), dtype=np.float32)
+        for pos in range(self.n_boxes):
+            anc_xmin_wrt_input, anc_ymin_wrt_input, anc_xmax_wrt_input, anc_ymax_wrt_input = self.get_anchor_coords_wrt_its_input(pos)
+            anchors_xmin_wrt_input[pos] = anc_xmin_wrt_input
+            anchors_ymin_wrt_input[pos] = anc_ymin_wrt_input
+            anchors_width_wrt_input[pos] = anc_xmax_wrt_input - anc_xmin_wrt_input
+            anchors_height_wrt_input[pos] = anc_ymax_wrt_input - anc_ymin_wrt_input
+        anchors_xmin_wrt_input = tf.constant(value=anchors_xmin_wrt_input, dtype=tf.float32)
+        anchors_ymin_wrt_input = tf.constant(value=anchors_ymin_wrt_input, dtype=tf.float32)
+        anchors_width_wrt_input = tf.constant(value=anchors_width_wrt_input, dtype=tf.float32)
+        anchors_height_wrt_input = tf.constant(value=anchors_height_wrt_input, dtype=tf.float32)
+        anchors_xmin_wrt_input_ext = tf.tile(tf.expand_dims(anchors_xmin_wrt_input, axis=0), [batch_size, 1])  # (batch_size, nboxes)
+        anchors_ymin_wrt_input_ext = tf.tile(tf.expand_dims(anchors_ymin_wrt_input, axis=0), [batch_size, 1])  # (batch_size, nboxes)
+        anchors_width_wrt_input_ext = tf.tile(tf.expand_dims(anchors_width_wrt_input, axis=0), [batch_size, 1])  # (batch_size, nboxes)
+        anchors_height_wrt_input_ext = tf.tile(tf.expand_dims(anchors_height_wrt_input, axis=0), [batch_size, 1])  # (batch_size, nboxes)
+        xmin_wrt_input = anchors_xmin_wrt_input_ext + coords_dec_wrt_anchor[..., 0] * anchors_width_wrt_input_ext  # (batch_size, nboxes)
+        ymin_wrt_input = anchors_ymin_wrt_input_ext + coords_dec_wrt_anchor[..., 1] * anchors_height_wrt_input_ext  # (batch_size, nboxes)
+        width_wrt_input = coords_dec_wrt_anchor[..., 2] * anchors_width_wrt_input_ext  # (batch_size, nboxes)
+        height_wrt_input = coords_dec_wrt_anchor[..., 3] * anchors_height_wrt_input_ext  # (batch_size, nboxes)
 
-        xmin = xc - 0.5 * width  # (nboxes)
-        ymin = yc - 0.5 * height  # (nboxes)
+        xmin_wrt_input = tf.Print(xmin_wrt_input, [xmin_wrt_input[0, 468]], 'xmin_wrt_input')
+        ymin_wrt_input = tf.Print(ymin_wrt_input, [ymin_wrt_input[0, 468]], 'ymin_wrt_input')
+        width_wrt_input = tf.Print(width_wrt_input, [width_wrt_input[0, 468]], 'width_wrt_input')
+        height_wrt_input = tf.Print(height_wrt_input, [height_wrt_input[0, 468]], 'height_wrt_input')
 
-        # Remove padding:
-        xmin = (xmin - self.max_pad_rel) / (1 - 2 * self.max_pad_rel)
-        ymin = (ymin - self.max_pad_rel) / (1 - 2 * self.max_pad_rel)
-        width = width / (1 - 2 * self.max_pad_rel)
-        height = height / (1 - 2 * self.max_pad_rel)
+        # From coordinates wrt input to coordinates wrt original image:
+        pad_rel = np.zeros(shape=(self.n_boxes), dtype=np.float32)
+        for pos in range(self.n_boxes):
+            grid_idx = self.get_grid_idx_from_flat_position(pos)
+            grid = self.grid_levels[grid_idx]
+            pad_rel[pos] = grid.pad_rel
+        pad_rel = tf.constant(value=pad_rel, dtype=tf.float32)
+        pad_rel_ext = tf.tile(tf.expand_dims(pad_rel, axis=0), [batch_size, 1])  # (batch_size, nboxes)
+        xmin_wrt_orig = (xmin_wrt_input - pad_rel_ext) / (1 - 2 * pad_rel_ext)  # (batch_size, nboxes)
+        ymin_wrt_orig = (ymin_wrt_input - pad_rel_ext) / (1 - 2 * pad_rel_ext)  # (batch_size, nboxes)
+        width_wrt_orig = width_wrt_input / (1 - 2 * pad_rel_ext)  # (batch_size, nboxes)
+        height_wrt_orig = height_wrt_input / (1 - 2 * pad_rel_ext)  # (batch_size, nboxes)
 
-        # Clip:
-        xmin = tf.clip_by_value(xmin, 0.0, 1.0)
-        ymin = tf.clip_by_value(ymin, 0.0, 1.0)
-        width = tf.maximum(0.0, tf.minimum(1.0 - xmin, width))
-        height = tf.maximum(0.0, tf.minimum(1.0 - ymin, height))
-        coords_raw = tf.stack([xmin, ymin, width, height], axis=-1)  # (nboxes, 4)
+        # Pack together:
+        coords_dec = tf.stack([xmin_wrt_orig, ymin_wrt_orig, width_wrt_orig, height_wrt_orig], axis=-1)  # (batch_size, nboxes, 4) [xmin, ymin, width, height]
 
-        return coords_raw  # (..., 4) [xmin, ymin, width, height]
+        coords_dec = tf.Print(coords_dec, [coords_dec[0, 468, :]], 'coords_dec')
 
-    # Compute the 'Percent Contained', the 'Area Ratio' and the 'Distance to Center' between ground truth boxes and and anchor boxes.
-    def compute_pc_ar_dc(self, gt_boxes):
-        # gt_boxes (n_gt, 4) [xmin, ymin, width, height]  # Parameterized with the top-left coordinates, and the width and height.
-        # self.anchors_coordinates is parameterized with the corner coordinates (xmin, ymin, xmax, ymax)
-        # Coordinates are relative (between 0 and 1)
-        # We consider the square containing the ground truth box.
+        return coords_dec  # (batch_size, nboxes, 4) [xmin, ymin, width, height]
 
-        n_gt = gt_boxes.shape[0]
-
-        orig_boxes = np.stack([gt_boxes[:, 0], gt_boxes[:, 1], gt_boxes[:, 0] + gt_boxes[:, 2], gt_boxes[:, 1] + gt_boxes[:, 3]], axis=1)
-        orig_boxes_expanded = np.expand_dims(orig_boxes, axis=1)  # (n_gt, 1, 4)
-        orig_boxes_expanded = np.tile(orig_boxes_expanded, (1, self.n_boxes, 1))  # (n_gt, nboxes, 4) [xmin, ymin, xmax, ymax]
-
-        gt_boxes_xcenter = gt_boxes[:, 0] + gt_boxes[:, 2] / 2.0
-        gt_boxes_ycenter = gt_boxes[:, 1] + gt_boxes[:, 3] / 2.0
-        gt_boxes_maxside = np.maximum(gt_boxes[:, 2], gt_boxes[:, 3])
-        gt_boxes_square_xmin = np.maximum(gt_boxes_xcenter - gt_boxes_maxside / 2.0, 0)
-        gt_boxes_square_ymin = np.maximum(gt_boxes_ycenter - gt_boxes_maxside / 2.0, 0)
-        gt_boxes_square_xmax = np.minimum(gt_boxes_xcenter + gt_boxes_maxside / 2.0, 1.0)
-        gt_boxes_square_ymax = np.minimum(gt_boxes_ycenter + gt_boxes_maxside / 2.0, 1.0)
-        gt_boxes_square = np.stack([gt_boxes_square_xmin, gt_boxes_square_ymin, gt_boxes_square_xmax, gt_boxes_square_ymax], axis=1)  # (n_gt, 4) [xmin, ymin, xmax, ymax]
-        # Expand gt boxes:
-        sq_boxes_expanded = np.expand_dims(gt_boxes_square, axis=1)  # (n_gt, 1, 4)
-        sq_boxes_expanded = np.tile(sq_boxes_expanded, (1, self.n_boxes, 1))  # (n_gt, nboxes, 4)
-
-        # Expand anchor boxes:
-        anchors_expanded = np.expand_dims(self.anchors_coordinates, axis=0)  # (1, nboxes, 4)
-        anchors_expanded = np.tile(anchors_expanded, (n_gt, 1, 1))  # (n_gt, nboxes, 4) [xmin, ymin, xmax, ymax]
-
-        # Compute intersection:
-        xmin = np.maximum(orig_boxes_expanded[:, :, 0], anchors_expanded[:, :, 0])  # (n_gt, nboxes)
-        ymin = np.maximum(orig_boxes_expanded[:, :, 1], anchors_expanded[:, :, 1])  # (n_gt, nboxes)
-        xmax = np.minimum(orig_boxes_expanded[:, :, 2], anchors_expanded[:, :, 2])  # (n_gt, nboxes)
-        ymax = np.minimum(orig_boxes_expanded[:, :, 3], anchors_expanded[:, :, 3])  # (n_gt, nboxes)
-        zero_grid = np.zeros((n_gt, self.n_boxes))  # (n_gt, nboxes)
-        w = np.maximum(xmax - xmin, zero_grid)  # (n_gt, nboxes)
-        h = np.maximum(ymax - ymin, zero_grid)  # (n_gt, nboxes)
-        area_inter_orig = w * h  # (n_gt, nboxes)
-
-        # Percent contained:
-        area_gt_orig = (orig_boxes_expanded[:, :, 2] - orig_boxes_expanded[:, :, 0]) * (orig_boxes_expanded[:, :, 3] - orig_boxes_expanded[:, :, 1])  # (n_gt, nboxes)
-        pc = area_inter_orig / area_gt_orig  # (n_gt, nboxes)
-
-        # Area ratio:
-        area_gt_sq = (sq_boxes_expanded[:, :, 2] - sq_boxes_expanded[:, :, 0]) * (sq_boxes_expanded[:, :, 3] - sq_boxes_expanded[:, :, 1])  # (n_gt, nboxes)
-        area_anchors = (anchors_expanded[:, :, 2] - anchors_expanded[:, :, 0]) * (anchors_expanded[:, :, 3] - anchors_expanded[:, :, 1])  # (n_gt, nboxes)
-        # ar = area_gt_orig / area_anchors  # (n_gt, nboxes)
-        ar = area_gt_sq / area_anchors  #  (n_gt, nboxes)
-
-        intersection_xcenter = (xmin + xmax) / 2.0  # (n_gt, nboxes)
-        intersection_ycenter = (ymin + ymax) / 2.0  # (n_gt, nboxes)
-
-        anchors_xcenter_expanded = (anchors_expanded[:, :, 0] + anchors_expanded[:, :, 2]) / 2.0  # (n_gt, nboxes)
-        anchors_ycenter_expanded = (anchors_expanded[:, :, 1] + anchors_expanded[:, :, 3]) / 2.0  # (n_gt, nboxes)
-
-        anchors_width_expanded = anchors_expanded[:, :, 2] - anchors_expanded[:, :, 0]
-        anchors_height_expanded = anchors_expanded[:, :, 3] - anchors_expanded[:, :, 1]
-
-        rel_distance_x = (anchors_xcenter_expanded - intersection_xcenter) / (anchors_width_expanded / 2.0)
-        rel_distance_y = (anchors_ycenter_expanded - intersection_ycenter) / (anchors_height_expanded / 2.0)
-
-        dc = np.sqrt(np.square(rel_distance_x) + np.square(rel_distance_y))  # (n_gt, nboxes)
-        dc = np.minimum(dc, np.sqrt(2.0))
-
-        return pc, ar, dc
-
-    def write_anchor_info_file(self, info_file_path, softmax, pred_class, cm_pred, img_idx, anchor_pos):
+    def write_anchor_info_file(self, info_file_path, softmax, pred_class, cm_pred, img_idx, anchor_pos, coords_enc, coords_dec):
         # softmax: (nclasses)
         with open(info_file_path, 'w') as fid:
             fid.write('softmax =')
@@ -389,6 +325,29 @@ class MultiCellArch:
             fid.write('\n')
             fid.write('predicted_class = ' + str(pred_class) + ' (' + self.classnames[pred_class] + ')\n')
             fid.write('conf = ' + str(softmax[img_idx, anchor_pos, pred_class]) + '\n')
+            grid_idx = self.get_grid_idx_from_flat_position(anchor_pos)
+            grid = self.grid_levels[grid_idx]
+            fid.write('grid_idx = ' + str(grid_idx) + '\n')
+            xmin_a_i, ymin_a_i, xmax_a_i, ymax_a_i = self.get_anchor_coords_wrt_its_input(anchor_pos)
+            fid.write('anchor coords input [xmin, ymin, xmax, ymax] = ' + str([xmin_a_i, ymin_a_i, xmax_a_i, ymax_a_i]) + '\n')
+            fid.write('anchor coords orig [xmin, ymin, width, height] = ' + str([self.anchors_coordinates[anchor_pos, 0],
+                                                                            self.anchors_coordinates[anchor_pos, 1],
+                                                                            self.anchors_w[anchor_pos],
+                                                                            self.anchors_h[anchor_pos]]) + '\n')
+            fid.write('coords_enc = ' + str(coords_enc) + '\n')
+            fid.write('coords_dec = ' + str(coords_dec) + '\n')
+            x0_r_a = coords_dec[0]
+            x0_r_p = xmin_a_i + x0_r_a * (xmax_a_i - xmin_a_i)
+            x0_r_o = min(max((x0_r_p - grid.pad_rel) / (1 - 2 * grid.pad_rel), 0), 1)
+            fid.write('x0_r_a = ' + str(x0_r_a) + '\n')
+            fid.write('x0_r_p = ' + str(x0_r_p) + '\n')
+            fid.write('x0_r_o = ' + str(x0_r_o) + '\n')
+            y0_r_a = coords_dec[1]
+            y0_r_p = ymin_a_i + y0_r_a * (ymax_a_i - ymin_a_i)
+            y0_r_o = min(max((y0_r_p - grid.pad_rel) / (1 - grid.pad_rel), 0), 1)
+            fid.write('y0_r_a = ' + str(y0_r_a) + '\n')
+            fid.write('y0_r_p = ' + str(y0_r_p) + '\n')
+            fid.write('y0_r_o = ' + str(y0_r_o) + '\n')
             if self.opts.predict_cm:
                 fid.write('cm_pred = ' + str(cm_pred[img_idx, anchor_pos]) + '\n')
 
@@ -448,7 +407,7 @@ class MultiCellArch:
                 cv2.imwrite(path_to_save, cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_RGB2BGR))
                 # Save info file:
                 info_file_path = os.path.join(dir_img, 'pos' + str(pos) + '_info.txt')
-                self.write_anchor_info_file(info_file_path, softmax, predicted_class, cm_pred, img_idx, pos)
+                self.write_anchor_info_file(info_file_path, softmax, predicted_class, cm_pred, img_idx, pos, coords_enc, coords_dec)
         return net_output
 
 

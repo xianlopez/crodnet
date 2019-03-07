@@ -10,23 +10,6 @@ class BoundingBox:
         self.classid = cl_id
         self.pc = percent_contained
 
-    def apply_padding(self, pad_rel):
-        self.xmin = pad_rel + self.xmin * (1 - 2 * pad_rel)
-        self.ymin = pad_rel + self.ymin * (1 - 2 * pad_rel)
-        self.width = self.width * (1 - 2 * pad_rel)
-        self.height = self.height * (1 - 2 * pad_rel)
-
-    def remove_padding(self, pad_rel, clip=True):
-        self.xmin = (self.xmin - pad_rel) / (1 - 2 * pad_rel)
-        self.ymin = (self.ymin - pad_rel) / (1 - 2 * pad_rel)
-        self.width = self.width / (1 - 2 * pad_rel)
-        self.height = self.height / (1 - 2 * pad_rel)
-        if clip:
-            self.xmin = np.clip(self.xmin, 0, 1)
-            self.ymin = np.clip(self.ymin, 0, 1)
-            self.width = max(0, min(1 - self.xmin, self.width))
-            self.height = max(0, min(1 - self.ymin, self.height))
-
     def get_coords(self):
         return [self.xmin, self.ymin, self.width, self.height]
 
@@ -44,19 +27,6 @@ class BoundingBox:
         self.ymin = self.ymin / float(img_height)
         self.width = self.width / float(img_width)
         self.height = self.height / float(img_height)
-
-    # def convert_to_absolute(self, img_width, img_height):
-    #     if not self.is_relative():
-    #         raise Exception('Error converting to absolute: image is already absolute.')
-    #     self.xmin = int(np.round(self.xmin * img_width))
-    #     self.ymin = int(np.round(self.ymin * img_height))
-    #     self.width = int(np.round(self.width * img_width))
-    #     self.height = int(np.round(self.height * img_height))
-    #     # Make sure it fits inside the image:
-    #     self.xmin = min(max(self.xmin, 0), img_width - 1)
-    #     self.ymin = min(max(self.ymin, 0), img_height - 1)
-    #     self.width = min(max(self.width, 1), img_width - self.xmin)
-    #     self.height = min(max(self.height, 1), img_height - self.ymin)
 
     def get_abs_coords(self, img_width, img_height):
         # if not self.is_relative():
