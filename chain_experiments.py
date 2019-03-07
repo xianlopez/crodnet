@@ -1,5 +1,5 @@
 import tensorflow as tf
-from main import main
+from SingleCellMain import main
 import numpy as np
 
 class InlineArgs:
