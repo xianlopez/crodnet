@@ -26,7 +26,7 @@ class Checkpoint:
 
 
 # ======================================================================================================================
-class TrainEnv:
+class MultiCellTrainEnv:
 
     # ------------------------------------------------------------------------------------------------------------------
     def __init__(self, opts):
@@ -45,7 +45,6 @@ class TrainEnv:
         self.classnames = None
         self.nclasses = None
         self.model_variables = None
-        self.reader = None
         self.tensorboard_process = None
 
         self.nbatches_accum = self.opts.nbatches_accum
@@ -303,8 +302,10 @@ class TrainEnv:
         img_extension, self.classnames = tools.process_dataset_config(os.path.join(dirdata, 'dataset_info.xml'))
         self.nclasses = len(self.classnames)
         self.arch = MultiCellArch.MultiCellArch(self.opts.multi_cell_opts, self.nclasses, self.opts.outdir, self.opts.th_conf, self.classnames)
-        self.define_inputs_and_labels()
-        self.loss, self.metrics, self.localizations, self.softmax = self.arch.make(self.inputs, self.labels_enc, self.filenames)
+        self.define_inputs()
+        self.arch.make_network(self.inputs)
+        self.labels_enc = self.reader_train.build_labels_enc()
+        self.loss, self.metrics, self.localizations, self.softmax = self.arch.make_loss_metrics_and_preds(self.labels_enc, self.filenames)
         self.model_variables = [n.name for n in tf.global_variables()]
         if self.opts.l2_regularization > 0:
             self.loss += L2RegularizationLoss(self.opts)
@@ -318,13 +319,12 @@ class TrainEnv:
         self.saver = tf.train.Saver(name='net_saver', max_to_keep=1000000)
 
     # ------------------------------------------------------------------------------------------------------------------
-    def define_inputs_and_labels(self):
+    def define_inputs(self):
         input_shape = self.arch.get_input_shape()
         with tf.device('/cpu:0'):
             self.reader_train = MultiCellDataReader.MultiCellDataReader(input_shape, self.opts, self.arch, 'train')
             self.reader_val = MultiCellDataReader.MultiCellDataReader(input_shape, self.opts, self.arch, 'val')
             self.inputs = self.reader_train.build_inputs()
-            self.labels_enc = self.reader_train.build_labels_enc()
 
     # ------------------------------------------------------------------------------------------------------------------
     def define_initializer(self):

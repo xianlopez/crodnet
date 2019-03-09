@@ -132,21 +132,26 @@ class MultiCellArch:
         print('')
         print('Total number of boxes: ' + str(self.n_boxes))
 
-    def make(self, inputs, labels_enc, filenames):
+    def make_network(self, inputs):
         # inputs: (batch_size, input_image_size, input_image_size, 3)
+        self.inputs_all_sizes = self.make_input_multiscale(inputs)
+        self.net_output, CRs = self.net_on_every_size(self.inputs_all_sizes)  # (batch_size, nboxes, ?)
+        self.compute_anchors_coordinates()
+
+    def make_loss_metrics_and_preds(self, labels_enc, filenames):
         # labels_enc: (batch_size, nboxes, nlabels)
-        inputs_all_sizes = self.make_input_multiscale(inputs)
-        net_output, CRs = self.net_on_every_size(inputs_all_sizes)  # (batch_size, nboxes, ?)
         self.compute_anchors_coordinates()
         # Make loss and metrics:
-        loss, metrics = self.make_loss_and_metrics(net_output, labels_enc)  # ()
+        loss, metrics = self.make_loss_and_metrics(self.net_output, labels_enc)  # ()
         if self.opts.debug:
-            debug_inputs = [net_output]
-            debug_inputs.extend(inputs_all_sizes)
-            net_output_shape = net_output.shape
-            net_output = tf.py_func(self.write_debug_info, debug_inputs, (tf.float32))
-            net_output.set_shape(net_output_shape)
-        localizations, softmax = self.obtain_localizations_and_softmax(net_output)
+            debug_inputs = [self.net_output]
+            debug_inputs.extend(self.inputs_all_sizes)
+            net_output_shape = self.net_output.shape
+            net_output2 = tf.py_func(self.write_debug_info, debug_inputs, (tf.float32))
+            net_output2.set_shape(net_output_shape)
+            localizations, softmax = self.obtain_localizations_and_softmax(net_output2)
+        else:
+            localizations, softmax = self.obtain_localizations_and_softmax(self.net_output)
         return loss, metrics, localizations, softmax
 
     def obtain_localizations_and_softmax(self, net_output):
@@ -552,11 +557,10 @@ def classification_loss_and_metric(pred_conf, mask_match, mask_neutral, gt_class
         loss_negatives = tf.where(mask_negatives, loss_orig, zeros, name='loss_negatives')
         n_negatives = tf.reduce_sum(tf.cast(mask_negatives, tf.int32), name='n_negatives')  # ()
         n_negatives_keep = tf.cast(tf.minimum(tf.maximum(1, n_positives * negative_ratio), n_negatives), tf.int32)
-        n_positives = tf.Print(n_positives, [n_positives], 'n_negatives_keep')
-        n_negatives_keep = tf.Print(n_negatives_keep, [n_negatives_keep], 'n_negatives_keep')
+        # n_positives = tf.Print(n_positives, [n_positives], 'n_positives')
+        # n_negatives_keep = tf.Print(n_negatives_keep, [n_negatives_keep], 'n_negatives_keep')
         loss_negatives_flat = tf.reshape(loss_negatives, [-1])  # (batch_size * nboxes)
-        _, indices = tf.nn.top_k(loss_negatives_flat, k=n_negatives_keep, sorted=False)
-        print('indices = ' + str(indices))
+        _, indices = tf.nn.top_k(loss_negatives_flat, k=n_negatives_keep, sorted=False)  # (?)
         negatives_keep = tf.scatter_nd(indices=tf.expand_dims(indices, axis=1),
                                        updates=tf.ones_like(indices, dtype=tf.int32), shape=tf.shape(loss_negatives_flat))
         negatives_keep = tf.cast(tf.reshape(negatives_keep, [-1, n_boxes]), tf.bool)  # (batch_size, nboxes)
@@ -567,7 +571,7 @@ def classification_loss_and_metric(pred_conf, mask_match, mask_neutral, gt_class
         loss_conf = tf.reduce_sum(loss_pos_scaled + loss_neg_scaled, name='loss_conf')  # ()
 
         # Metric:
-        predicted_class = tf.argmax(pred_conf, axis=1, output_type=tf.int32)  # (batchsize, nboxes)
+        predicted_class = tf.argmax(pred_conf, axis=-1, output_type=tf.int32)  # (batch_size, nboxes)
         hits = tf.cast(tf.equal(gt_class_int, predicted_class), tf.float32)  # (batch_ize, nboxes)
         hits_no_neutral = tf.where(tf.logical_not(mask_neutral), hits, zeros)  # (batc_size, nboxes)
         n_hits = tf.reduce_sum(hits_no_neutral)  # ()

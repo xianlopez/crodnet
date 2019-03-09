@@ -4,17 +4,17 @@ import network
 
 
 def encode_boxes_wrt_anchor_np(coords_raw, opts):
-    # coords_raw: (4)
-    xmin = coords_raw[0]
-    ymin = coords_raw[1]
-    width = coords_raw[2]
-    height = coords_raw[3]
+    # coords_raw: (..., 4)
+    xmin = coords_raw[..., 0]  # (...)
+    ymin = coords_raw[..., 1]  # (...)
+    width = coords_raw[..., 2]  # (...)
+    height = coords_raw[..., 3]  # (...)
 
-    xc = xmin + 0.5 * width
-    yc = ymin + 0.5 * height
+    xc = xmin + 0.5 * width  # (...)
+    yc = ymin + 0.5 * height  # (...)
 
-    dcx = (0.5 - xc) / 0.5
-    dcy = (0.5 - yc) / 0.5
+    dcx = (0.5 - xc) / 0.5  # (...)
+    dcy = (0.5 - yc) / 0.5  # (...)
     # Between -1 and 1 for the box to lie inside the anchor.
 
     # Encoding step:
@@ -36,9 +36,9 @@ def encode_boxes_wrt_anchor_np(coords_raw, opts):
     else:
         raise Exception('Encoding method not recognized.')
 
-    coords_enc = np.stack([dcx_enc, dcy_enc, w_enc, h_enc], axis=0)  # (4)
+    coords_enc = np.stack([dcx_enc, dcy_enc, w_enc, h_enc], axis=-1)  # (..., 4)
 
-    return coords_enc  # (4) [dcx_enc, dcy_enc, w_enc, h_enc]
+    return coords_enc  # (..., 4) [dcx_enc, dcy_enc, w_enc, h_enc]
 
 
 def decoding_split_np(dcx_enc, dcy_enc, w_enc, h_enc, opts):

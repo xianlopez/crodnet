@@ -16,8 +16,18 @@ class CommonOptions:
         self.enc_wh_a = 2
         self.enc_wh_b = 0.5 * (1 - self.enc_wh_a)
 
+        self.threshold_pc = 0.99
+        self.threshold_dc = 0.12
+        self.threshold_pc_neutral = 0.8
+        self.threshold_dc_neutral = 0.15
         self.threshold_ar_low = 0.05
+        self.threshold_ar_low_neutral = 0.04
         self.threshold_ar_high = 0.5
+        self.threshold_ar_high_neutral = 0.55
+
+        self.loc_loss_factor = 1
+
+        self.negative_ratio = 3
 
 
 class MultiCellOptions(CommonOptions):
@@ -39,14 +49,6 @@ class SingleCellOptions(CommonOptions):
         self.n_comparisons_intra = 8
         self.n_comparisons_inter = 1
 
-        self.threshold_pc = 0.99
-        self.threshold_dc = 0.12
-        self.threshold_pc_neutral = 0.8
-        self.threshold_dc_neutral = 0.15
-        self.threshold_ar_low_neutral = 0.04
-        self.threshold_ar_high_neutral = 0.55
-
-        self.loc_loss_factor = 1
         self.comp_loss_factor = 1
         self.pc_loss_factor = 0.2
         self.dc_loss_factor = 0.2
