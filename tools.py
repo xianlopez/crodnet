@@ -208,6 +208,31 @@ def add_mean_again(image):
 
 
 # ----------------------------------------------------------------------------------------------------------------------
+def compute_pc(box1, box2):
+    # box coordinates: [xmin, ymin, w, h]
+    if np.min(np.array(box1[2:])) < 0 or np.min(np.array(box2[2:])) < 0:
+        # We make sure width and height are non-negative. If that happens, just assign 0 iou.
+        pc = 0
+    else:
+        lu = np.max(np.array([box1[:2], box2[:2]]), axis=0)
+        rd = np.min(np.array([[box1[0] + box1[2], box1[1] + box1[3]], [box2[0] + box2[2], box2[1] + box2[3]]]), axis=0)
+        intersection = np.maximum(0.0, rd-lu)
+        intersec_area = intersection[0] * intersection[1]
+        area1 = box1[2] * box1[3]
+        area2 = box2[2] * box2[3]
+        if area1 < 1e-6 or area2 < 1e-6:
+            if intersec_area > 1e-6:
+                pc = 1
+            else:
+                pc = 0
+        else:
+            min_area = min(area1, area2)
+            pc = intersec_area / np.float(min_area)
+    assert pc >= 0, 'Negative PC'
+    return pc
+
+
+# ----------------------------------------------------------------------------------------------------------------------
 def compute_iou(box1, box2):
     # box coordinates: [xmin, ymin, w, h]
     if np.min(np.array(box1[2:])) < 0 or np.min(np.array(box2[2:])) < 0:

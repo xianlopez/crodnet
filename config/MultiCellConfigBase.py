@@ -43,6 +43,7 @@ class MultiCellConfiguration:
     write_results = False
 
     threshold_nms = 0.5
+    threshold_pcs = 0.6
     threshold_iou = 0.5
     comp_th = 0.7
 

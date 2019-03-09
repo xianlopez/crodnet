@@ -67,6 +67,8 @@ class MultiCellEnv:
                 batch_gt_boxes, batch_pred_boxes = self.postprocess_gt_and_preds(batch_bboxes, localizations, softmax, cm)
                 # Supress repeated predictions with non-maximum suppression:
                 batch_pred_boxes = non_maximum_suppression_batched(batch_pred_boxes, self.opts.threshold_nms)
+                # Supress repeated predictions with pc suppression:
+                batch_pred_boxes = pc_suppression_batched(batch_pred_boxes, self.opts.threshold_pcs)
                 # Supress repeated predictions that non-maximum supression using Centrality Measure:
                 # batch_pred_boxes = self.nms_cm_batched(batch_pred_boxes)
                 # Supress repeated predictions with comparisons:
@@ -259,6 +261,31 @@ class MultiCellEnv:
         return remaining_boxes
 
 
+def pc_suppression_batched(batch_boxes, threshold_pcs):
+    # batch_boxes: List of size batch_size, with lists with all the predicted bounding boxes in an image.
+    batch_remaining_boxes = []
+    batch_size = len(batch_boxes)
+    for img_idx in range(batch_size):
+        remaining_boxes = pc_suppression(batch_boxes[img_idx], threshold_pcs)
+        batch_remaining_boxes.append(remaining_boxes)
+    return batch_remaining_boxes
+
+
+def pc_suppression(boxes, threshold_pcs):
+    # boxes: List with all the predicted bounding boxes in the image.
+    nboxes = len(boxes)
+    boxes.sort(key=operator.attrgetter('area'))
+    for i in range(nboxes):
+        for j in range(i + 1, nboxes):
+            if boxes[j].confidence >= boxes[i].confidence and np.abs(boxes[i].classid - boxes[j].classid) < 0.5:
+                if tools.compute_pc(boxes[i].get_coords(), boxes[j].get_coords()) > threshold_pcs:
+                    assert boxes[i].area <= boxes[j].area, 'Suppressing boxes in reverse order in PCS'
+                    boxes[i].confidence = -np.inf
+                    break
+    remaining_boxes = [x for x in boxes if x.confidence != -np.inf]
+    return remaining_boxes
+
+
 def non_maximum_suppression_batched(batch_boxes, threshold_nms):
     # batch_boxes: List of size batch_size, with lists with all the predicted bounding boxes in an image.
     batch_remaining_boxes = []
@@ -275,7 +302,7 @@ def non_maximum_suppression(boxes, threshold_nms):
     boxes.sort(key=operator.attrgetter('confidence'))
     for i in range(nboxes):
         for j in range(i + 1, nboxes):
-            if boxes[j].confidence != -np.inf and np.abs(boxes[i].classid - boxes[j].classid) < 0.5:
+            if np.abs(boxes[i].classid - boxes[j].classid) < 0.5:
                 if tools.compute_iou(boxes[i].get_coords(), boxes[j].get_coords()) > threshold_nms:
                     assert boxes[i].confidence <= boxes[j].confidence, 'Suppressing boxes in reverse order in NMS'
                     boxes[i].confidence = -np.inf

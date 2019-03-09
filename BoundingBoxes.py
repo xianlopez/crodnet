@@ -9,6 +9,7 @@ class BoundingBox:
         self.height = coords[3]
         self.classid = cl_id
         self.pc = percent_contained
+        self.area = self.width * self.height
 
     def get_coords(self):
         return [self.xmin, self.ymin, self.width, self.height]
