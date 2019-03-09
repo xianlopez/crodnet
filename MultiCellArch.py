@@ -8,6 +8,7 @@ import network
 from GridLevel import GridLevel
 import CommonEncoding
 import output_encoding
+import gt_encoding
 
 
 class MultiCellArch:
@@ -29,23 +30,13 @@ class MultiCellArch:
         self.n_comparisons = -1
         self.metric_names = ['mAP']
         self.n_metrics = len(self.metric_names)
-        self.make_comparison_op()
         self.batch_count_debug = 0
         self.th_conf = th_conf
         self.classnames = classnames
+        self.n_labels = 8
         if self.opts.debug:
             self.debug_dir = os.path.join(outdir, 'debug')
             os.makedirs(self.debug_dir)
-
-    def make_comparison_op(self):
-        self.CR1 = tf.placeholder(shape=(self.opts.lcr), dtype=tf.float32)
-        self.CR2 = tf.placeholder(shape=(self.opts.lcr), dtype=tf.float32)
-        CRs = tf.stack([self.CR1, self.CR2], axis=0)  # (2, lcr)
-        CRs = tf.expand_dims(CRs, axis=0)  # (1, 2, lcr)
-        self.comparison_op = network.comparison(CRs, self.opts.lcr)  # (1, 2)
-        self.comparison_op = tf.squeeze(self.comparison_op)  # (2)
-        softmax = tf.nn.softmax(self.comparison_op, axis=-1)  # (2)
-        self.pseudo_distance = softmax[0]  # ()
 
     def get_expected_num_boxes(self):
         expected_n_boxes = 0
@@ -71,30 +62,6 @@ class MultiCellArch:
         self.anchors_yc = (self.anchors_coordinates[:, 1] + self.anchors_coordinates[:, 3]) / 2.0
         self.anchors_w = self.anchors_coordinates[:, 2] - self.anchors_coordinates[:, 0]
         self.anchors_h = self.anchors_coordinates[:, 3] - self.anchors_coordinates[:, 1]
-
-    def assign_comparisons_between_anchors(self):
-        total_number_of_comparisons = 0
-        self.comparisons_references = []
-        for i in range(self.n_boxes):
-            anchors_to_compare = []
-            for j in range(i+1, self.n_boxes):
-                box1 = np.array([self.anchors_coordinates[i, 0],
-                                 self.anchors_coordinates[i, 1],
-                                 self.anchors_w[i],
-                                 self.anchors_h[i]])  # (xmin, ymin, width, height)
-                box2 = np.array([self.anchors_coordinates[j, 0],
-                                 self.anchors_coordinates[j, 1],
-                                 self.anchors_w[j],
-                                 self.anchors_h[j]])  # (xmin, ymin, width, height)
-                iou = compute_iou_multi_dim(box1, box2)
-                if iou >= self.opts.min_iou_to_compare:
-                    anchors_to_compare.append(j)
-            n_comp_this_anchor = len(anchors_to_compare)
-            total_number_of_comparisons += n_comp_this_anchor
-            # print('Anchor ' + str(i) + ': ' + str(n_comp_this_anchor) + ' comparisons.')
-            self.comparisons_references.append(anchors_to_compare)
-        mean_comparisons = total_number_of_comparisons / float(self.n_boxes)
-        print('Mean number of comparisons per anchor: ' + str(mean_comparisons))
 
     def make_input_multiscale(self, inputs):
         inputs_all_sizes = []
@@ -165,19 +132,22 @@ class MultiCellArch:
         print('')
         print('Total number of boxes: ' + str(self.n_boxes))
 
-    def make(self, inputs):
+    def make(self, inputs, labels_enc, filenames):
+        # inputs: (batch_size, input_image_size, input_image_size, 3)
+        # labels_enc: (batch_size, nboxes, nlabels)
         inputs_all_sizes = self.make_input_multiscale(inputs)
         net_output, CRs = self.net_on_every_size(inputs_all_sizes)  # (batch_size, nboxes, ?)
         self.compute_anchors_coordinates()
-        self.assign_comparisons_between_anchors()
+        # Make loss and metrics:
+        loss, metrics = self.make_loss_and_metrics(net_output, labels_enc)  # ()
         if self.opts.debug:
             debug_inputs = [net_output]
             debug_inputs.extend(inputs_all_sizes)
             net_output_shape = net_output.shape
             net_output = tf.py_func(self.write_debug_info, debug_inputs, (tf.float32))
             net_output.set_shape(net_output_shape)
-        localizations, softmax, pc, dc, cm = self.obtain_localizations_and_softmax(net_output)
-        return localizations, softmax, CRs, pc, dc, cm
+        localizations, softmax = self.obtain_localizations_and_softmax(net_output)
+        return loss, metrics, localizations, softmax
 
     def obtain_localizations_and_softmax(self, net_output):
         # net_output: (batch_size, nboxes, ?)
@@ -185,27 +155,12 @@ class MultiCellArch:
         # Split net output:
         locs_enc = output_encoding.get_loc_enc(net_output)  # (batch_size, nboxes, 4)
         logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size, nboxes, nclasses)
-        pc_enc = output_encoding.get_pc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size, nboxes) or None
-        dc_enc = output_encoding.get_dc_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size, nboxes) or None
-        cm_enc = output_encoding.get_cm_enc(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size, nboxes) or None
 
         # Decode
         localizations_dec = self.decode_boxes_wrt_orig_tf(locs_enc)  # (batch_size, nboxes, 4)
         softmax = tf.nn.softmax(logits, axis=-1)  # (batch_size, nboxes, nclasses)
-        if self.opts.predict_pc:
-            pc = CommonEncoding.decode_pc_or_dc_tf(pc_enc)
-        else:
-            pc = None
-        if self.opts.predict_dc:
-            dc = CommonEncoding.decode_pc_or_dc_tf(dc_enc)
-        else:
-            dc = None
-        if self.opts.predict_cm:
-            cm = CommonEncoding.decode_cm_tf(cm_enc)
-        else:
-            cm = None
 
-        return localizations_dec, softmax, pc, dc, cm
+        return localizations_dec, softmax
 
 
     def get_grid_idx_from_flat_position(self, position):
@@ -305,6 +260,183 @@ class MultiCellArch:
 
         return coords_dec  # (batch_size, nboxes, 4) [xmin, ymin, width, height]
 
+    def make_loss_and_metrics(self, net_output, labels_enc):
+        # net_output: (batch_size, nboxes, ?)
+        # labels_enc: (batch_size, nboxes, nlabels)
+
+        # Split net output:
+        locs_enc = output_encoding.get_loc_enc(net_output)  # (batch_size, nboxes, 4)
+        logits = output_encoding.get_logits(net_output, self.opts.predict_pc, self.opts.predict_dc, self.opts.predict_cm)  # (batch_size, nboxes, nclasses)
+
+        mask_match = gt_encoding.get_mask_match(labels_enc)  # (batch_size, nboxes)
+        mask_neutral = gt_encoding.get_mask_neutral(labels_enc)  # (batch_size, nboxes)
+        gt_class_ids = gt_encoding.get_class_id(labels_enc)  # (batch_size, nboxes)
+        gt_coords = gt_encoding.get_coords_enc(labels_enc)  # (batch_size, nboxes)
+
+        mask_match = tf.greater(mask_match, 0.5)  # (batch_size, nboxes)
+        mask_neutral = tf.greater(mask_neutral, 0.5)  # (batch_size, nboxes)
+
+        zeros = tf.zeros_like(mask_match, dtype=tf.float32)  # (batch_size, nboxes)
+
+        conf_loss, accuracy_conf = classification_loss_and_metric(logits, mask_match, mask_neutral,
+                                                                  gt_class_ids, zeros, self.opts.negative_ratio, self.n_boxes)
+        tf.summary.scalar('losses/conf_loss', conf_loss)
+        tf.summary.scalar('metrics/accuracy_conf', accuracy_conf)
+        total_loss = conf_loss
+
+        loc_loss, iou_mean = localization_loss_and_metric(locs_enc, mask_match, mask_neutral, gt_coords, zeros,
+                                                          self.opts.loc_loss_factor, self.opts)
+        tf.summary.scalar('losses/loc_loss', loc_loss)
+        tf.summary.scalar('metrics/iou_mean', iou_mean)
+        total_loss += loc_loss
+
+        metrics = tf.stack([accuracy_conf, iou_mean])  # (2)
+
+        # total_loss: ()
+        return total_loss, metrics
+
+    def encode_gt_batched(self, gt_boxes_batched):
+        # gt_boxes_batched: List of length batch_size
+        batch_size = len(gt_boxes_batched)
+        labels_enc_batched = np.zeros(shape=(batch_size, self.n_boxes, self.n_labels), dtype=np.float32)
+        for i in range(batch_size):
+            labels_enc = self.encode_gt_from_array(gt_boxes_batched[i])  # (nboxes, nlabels)
+            labels_enc_batched[i, ...] = labels_enc
+        return labels_enc_batched
+
+
+    def encode_gt_from_array(self, gt_boxes):
+        # gt_boxes: (n_gt, 9) [class_id, xmin, ymin, width, height, pc, gt_idx, c_x_unclipped, c_y_unclipped]
+        n_gt = gt_boxes.shape[0]
+        if n_gt > 0:
+            gt_coords = gt_boxes[:, 1:5]  # (n_gt, 4)
+            gt_class_ids = gt_boxes[:, 0]  # (n_gt)
+            gt_pc_incoming = gt_boxes[:, 5]  # (n_gt)
+            gt_indices = gt_boxes[:, 6]  # (n_gt)
+
+            pc, ar, dc = self.compute_pc_ar_dc(gt_coords)  # All variables have shape (n_gt, n_boxes)
+
+            gt_pc_incoming_exp = np.expand_dims(gt_pc_incoming, axis=1)  # (n_gt, 1)
+            gt_pc_incoming_exp = np.tile(gt_pc_incoming_exp, [1, self.n_boxes])  # (n_gt, n_boxes)
+            pc = pc * gt_pc_incoming_exp  # (n_gt, n_boxes)
+
+            # Positive boxes:
+            mask_ar_low = ar > self.opts.threshold_ar_low  # (n_gt, n_boxes)
+            mask_ar_high = ar < self.opts.threshold_ar_high  # (n_gt, n_boxes)
+            mask_pc = pc > self.opts.threshold_pc  # (n_gt, n_boxes)
+            mask_dc = dc < self.opts.threshold_dc  # (n_gt, n_boxes)
+            mask_ar = mask_ar_low & mask_ar_high
+            mask_thresholds = mask_ar & mask_pc & mask_dc  # (n_gt, n_boxes)
+            mask_match = np.any(mask_thresholds, axis=0)  # (n_boxes)
+
+            # Neutral boxes:
+            mask_ar_low_neutral = ar > self.opts.threshold_ar_low_neutral  # (n_gt, n_boxes)
+            mask_ar_high_neutral = ar < self.opts.threshold_ar_high_neutral  # (n_gt, n_boxes)
+            mask_pc_neutral = pc > self.opts.threshold_pc_neutral  # (n_gt, n_boxes)
+            mask_dc_neutral = dc < self.opts.threshold_dc_neutral  # (n_gt, n_boxes)
+            mask_thresholds_neutral = mask_ar_low_neutral & mask_ar_high_neutral & mask_pc_neutral & mask_dc_neutral  # (n_gt, n_boxes)
+            mask_neutral = np.any(mask_thresholds_neutral, axis=0)  # (n_boxes)
+            mask_neutral = np.logical_and(mask_neutral, np.logical_not(mask_match))  # (n_boxes)
+
+            dc_masked_match = np.where(mask_thresholds, dc, np.infty * np.ones(shape=(n_gt, self.n_boxes), dtype=np.float32) ) # (n_gt, n_boxes)
+            dc_masked_neutral = np.where(mask_thresholds_neutral, dc, np.infty * np.ones(shape=(n_gt, self.n_boxes), dtype=np.float32) ) # (n_gt, n_boxes)
+            dc_masked = np.where(mask_match, dc_masked_match, dc_masked_neutral) # (n_gt, n_boxes)
+            nearest_valid_box_idx = np.argmin(dc_masked, axis=0)  # (n_boxes)
+
+            # Get the coordinates and the class id of the gt box matched:
+            coordinates = np.take(gt_coords, nearest_valid_box_idx, axis=0)  # (n_boxes, 4)
+            coordinates_enc = CommonEncoding.encode_boxes_wrt_anchor_np(coordinates, self.opts)  # (nboxes, 4)
+            class_ids_pos = np.take(gt_class_ids, nearest_valid_box_idx, axis=0)  # (n_boxes)
+            associated_gt_idx = np.take(gt_indices, nearest_valid_box_idx)  # (n_boxes)
+
+            # Negative boxes:
+            mask_negative = np.logical_and(np.logical_not(mask_match), np.logical_not(mask_neutral))  # (n_boxes)
+            mask_negative_x_4 = np.tile(np.expand_dims(mask_negative, axis=-1), [1, 4])  # (n_boxes, 4)
+            background_ids = np.ones(shape=(self.n_boxes), dtype=np.int32) * self.background_id
+            background_coords = np.zeros(shape=(self.n_boxes, 4), dtype=np.float32)  # (nboxes, 4)
+            class_ids = np.where(mask_negative, background_ids, class_ids_pos)  # (n_boxes)
+            coordinates_enc = np.where(mask_negative_x_4, background_coords, coordinates_enc)  # (n_boxes, 4)
+            associated_gt_idx = np.where(mask_negative, -1 * np.ones(shape=(self.n_boxes), dtype=np.float32), associated_gt_idx)  # (n_boxes)
+
+            # Put all together in one array:
+            labels_enc = np.stack([mask_match.astype(np.float32),
+                                   mask_neutral.astype(np.float32),
+                                   class_ids,
+                                   associated_gt_idx], axis=-1)
+            labels_enc = np.concatenate([coordinates_enc, labels_enc], axis=-1)  # (n_boxes, n_labels)
+
+        else:
+            labels_enc = np.zeros(shape=(self.n_boxes, self.n_labels), dtype=np.float32)
+            labels_enc[:, 6] = self.background_id
+
+        return labels_enc  # (n_boxes, n_labels)
+
+    # Compute the 'Percent Contained', the 'Area Ratio' and the 'Distance to Center' between ground truth boxes and and anchor boxes.
+    def compute_pc_ar_dc(self, gt_coords):
+        # gt_boxes (n_gt, 4) [xmin, ymin, width, height]  # Parameterized with the top-left coordinates, and the width and height.
+        # self.anchors_coordinates is parameterized with the corner coordinates (xmin, ymin, xmax, ymax)
+        # Coordinates are relative (between 0 and 1)
+        # We consider the square containing the ground truth box.
+
+        n_gt = gt_coords.shape[0]
+
+        orig_boxes = np.stack([gt_coords[:, 0], gt_coords[:, 1], gt_coords[:, 0] + gt_coords[:, 2], gt_coords[:, 1] + gt_coords[:, 3]], axis=1)
+        orig_boxes_expanded = np.expand_dims(orig_boxes, axis=1)  # (n_gt, 1, 4)
+        orig_boxes_expanded = np.tile(orig_boxes_expanded, (1, self.n_boxes, 1))  # (n_gt, nboxes, 4) [xmin, ymin, xmax, ymax]
+
+        gt_boxes_xcenter = gt_coords[:, 0] + gt_coords[:, 2] / 2.0
+        gt_boxes_ycenter = gt_coords[:, 1] + gt_coords[:, 3] / 2.0
+        gt_boxes_maxside = np.maximum(gt_coords[:, 2], gt_coords[:, 3])
+        gt_boxes_square_xmin = np.maximum(gt_boxes_xcenter - gt_boxes_maxside / 2.0, 0)
+        gt_boxes_square_ymin = np.maximum(gt_boxes_ycenter - gt_boxes_maxside / 2.0, 0)
+        gt_boxes_square_xmax = np.minimum(gt_boxes_xcenter + gt_boxes_maxside / 2.0, 1.0)
+        gt_boxes_square_ymax = np.minimum(gt_boxes_ycenter + gt_boxes_maxside / 2.0, 1.0)
+        gt_boxes_square = np.stack([gt_boxes_square_xmin, gt_boxes_square_ymin, gt_boxes_square_xmax, gt_boxes_square_ymax], axis=1)  # (n_gt, 4) [xmin, ymin, xmax, ymax]
+        # Expand gt boxes:
+        sq_boxes_expanded = np.expand_dims(gt_boxes_square, axis=1)  # (n_gt, 1, 4)
+        sq_boxes_expanded = np.tile(sq_boxes_expanded, (1, self.n_boxes, 1))  # (n_gt, nboxes, 4)
+
+        # Expand anchor boxes:
+        anchors_expanded = np.expand_dims(self.anchors_coordinates, axis=0)  # (1, nboxes, 4)
+        anchors_expanded = np.tile(anchors_expanded, (n_gt, 1, 1))  # (n_gt, nboxes, 4) [xmin, ymin, xmax, ymax]
+
+        # Compute intersection:
+        xmin = np.maximum(orig_boxes_expanded[:, :, 0], anchors_expanded[:, :, 0])  # (n_gt, nboxes)
+        ymin = np.maximum(orig_boxes_expanded[:, :, 1], anchors_expanded[:, :, 1])  # (n_gt, nboxes)
+        xmax = np.minimum(orig_boxes_expanded[:, :, 2], anchors_expanded[:, :, 2])  # (n_gt, nboxes)
+        ymax = np.minimum(orig_boxes_expanded[:, :, 3], anchors_expanded[:, :, 3])  # (n_gt, nboxes)
+        zero_grid = np.zeros((n_gt, self.n_boxes))  # (n_gt, nboxes)
+        w = np.maximum(xmax - xmin, zero_grid)  # (n_gt, nboxes)
+        h = np.maximum(ymax - ymin, zero_grid)  # (n_gt, nboxes)
+        area_inter_orig = w * h  # (n_gt, nboxes)
+
+        # Percent contained:
+        area_gt_orig = (orig_boxes_expanded[:, :, 2] - orig_boxes_expanded[:, :, 0]) * (orig_boxes_expanded[:, :, 3] - orig_boxes_expanded[:, :, 1])  # (n_gt, nboxes)
+        pc = area_inter_orig / area_gt_orig  # (n_gt, nboxes)
+
+        # Area ratio:
+        area_gt_sq = (sq_boxes_expanded[:, :, 2] - sq_boxes_expanded[:, :, 0]) * (sq_boxes_expanded[:, :, 3] - sq_boxes_expanded[:, :, 1])  # (n_gt, nboxes)
+        area_anchors = (anchors_expanded[:, :, 2] - anchors_expanded[:, :, 0]) * (anchors_expanded[:, :, 3] - anchors_expanded[:, :, 1])  # (n_gt, nboxes)
+        # ar = area_gt_orig / area_anchors  # (n_gt, nboxes)
+        ar = area_gt_sq / area_anchors  #  (n_gt, nboxes)
+
+        intersection_xcenter = (xmin + xmax) / 2.0  # (n_gt, nboxes)
+        intersection_ycenter = (ymin + ymax) / 2.0  # (n_gt, nboxes)
+
+        anchors_xcenter_expanded = (anchors_expanded[:, :, 0] + anchors_expanded[:, :, 2]) / 2.0  # (n_gt, nboxes)
+        anchors_ycenter_expanded = (anchors_expanded[:, :, 1] + anchors_expanded[:, :, 3]) / 2.0  # (n_gt, nboxes)
+
+        anchors_width_expanded = anchors_expanded[:, :, 2] - anchors_expanded[:, :, 0]
+        anchors_height_expanded = anchors_expanded[:, :, 3] - anchors_expanded[:, :, 1]
+
+        rel_distance_x = (anchors_xcenter_expanded - intersection_xcenter) / (anchors_width_expanded / 2.0)
+        rel_distance_y = (anchors_ycenter_expanded - intersection_ycenter) / (anchors_height_expanded / 2.0)
+
+        dc = np.sqrt(np.square(rel_distance_x) + np.square(rel_distance_y))  # (n_gt, nboxes)
+        dc = np.minimum(dc, np.sqrt(2.0))
+
+        return pc, ar, dc # (n_gt, nboxes)
+
     def write_anchor_info_file(self, info_file_path, softmax, pred_class, cm_pred, img_idx, anchor_pos, coords_enc, coords_dec):
         # softmax: (nclasses)
         with open(info_file_path, 'w') as fid:
@@ -402,7 +534,75 @@ class MultiCellArch:
         return net_output
 
 
-def compute_iou_multi_dim(boxes1, boxes2):
+def classification_loss_and_metric(pred_conf, mask_match, mask_neutral, gt_class, zeros, negative_ratio, n_boxes):
+    # pred_conf: (batch_size, nboxes, nclasses)
+    # mask_match: (batch_size, nboxes)
+    # mask_negative: (batch_size, nboxes)
+    # gt_class: (batch_size, nboxes)
+    # zeros: (batch_size, nboxes)
+    with tf.variable_scope('conf_loss'):
+        gt_class_int = tf.cast(gt_class, tf.int32)
+        loss_orig = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=gt_class_int, logits=pred_conf, name='loss_orig')  # (batch_size, nboxes)
+        loss_positives = tf.where(mask_match, loss_orig, zeros, name='loss_positives')  # (batch_size)
+        n_positives = tf.reduce_sum(tf.cast(mask_match, tf.int32), name='n_positives')  # ()
+        loss_pos_scaled = tf.divide(loss_positives, tf.maximum(tf.cast(n_positives, tf.float32), 1), name='loss_pos_scaled')  # (batch_size, nboxes)
+
+        # Hard negative mining:
+        mask_negatives = tf.logical_and(tf.logical_not(mask_match), tf.logical_not(mask_neutral), name='mask_negatives')  # (batch_size, nboxes)
+        loss_negatives = tf.where(mask_negatives, loss_orig, zeros, name='loss_negatives')
+        n_negatives = tf.reduce_sum(tf.cast(mask_negatives, tf.int32), name='n_negatives')  # ()
+        n_negatives_keep = tf.cast(tf.minimum(tf.maximum(1, n_positives * negative_ratio), n_negatives), tf.int32)
+        n_positives = tf.Print(n_positives, [n_positives], 'n_negatives_keep')
+        n_negatives_keep = tf.Print(n_negatives_keep, [n_negatives_keep], 'n_negatives_keep')
+        loss_negatives_flat = tf.reshape(loss_negatives, [-1])  # (batch_size * nboxes)
+        _, indices = tf.nn.top_k(loss_negatives_flat, k=n_negatives_keep, sorted=False)
+        print('indices = ' + str(indices))
+        negatives_keep = tf.scatter_nd(indices=tf.expand_dims(indices, axis=1),
+                                       updates=tf.ones_like(indices, dtype=tf.int32), shape=tf.shape(loss_negatives_flat))
+        negatives_keep = tf.cast(tf.reshape(negatives_keep, [-1, n_boxes]), tf.bool)  # (batch_size, nboxes)
+        loss_negatives = tf.where(negatives_keep, loss_orig, zeros, name='loss_negatives')
+        loss_neg_scaled = tf.divide(loss_negatives, tf.maximum(tf.cast(n_negatives, tf.float32), 1), name='loss_neg_scaled')  # (batch_size, nboxes)
+
+        # Join positives and negatives loss:
+        loss_conf = tf.reduce_sum(loss_pos_scaled + loss_neg_scaled, name='loss_conf')  # ()
+
+        # Metric:
+        predicted_class = tf.argmax(pred_conf, axis=1, output_type=tf.int32)  # (batchsize, nboxes)
+        hits = tf.cast(tf.equal(gt_class_int, predicted_class), tf.float32)  # (batch_ize, nboxes)
+        hits_no_neutral = tf.where(tf.logical_not(mask_neutral), hits, zeros)  # (batc_size, nboxes)
+        n_hits = tf.reduce_sum(hits_no_neutral)  # ()
+        accuracy_conf = tf.divide(n_hits, tf.maximum(tf.cast(n_negatives + n_positives, tf.float32), 1))  # ()
+
+    return loss_conf, accuracy_conf
+
+
+def localization_loss_and_metric(pred_coords, mask_match, mask_neutral, gt_coords, zeros, loc_loss_factor, opts):
+    # pred_coords: (batch_size, nboxes, 4)  encoded
+    # mask_match: (batch_size, nboxes)
+    # mask_neutral: (batch_size, nboxes)
+    # gt_coords: (batch_size, nboxes, 4)  encoded
+    # zeros: (batch_size, nboxes)
+    with tf.variable_scope('loc_loss'):
+        localization_loss = CommonEncoding.smooth_L1_loss(gt_coords, pred_coords)  # (batch_size, nboxes)
+        valids_for_loc = tf.logical_or(mask_match, mask_neutral)  # (batch_size, nboxes)
+        n_valids = tf.reduce_sum(tf.cast(valids_for_loc, tf.int32), name='n_valids')  # ()
+        n_valids_safe = tf.maximum(tf.cast(n_valids, tf.float32), 1)
+        localization_loss_matches = tf.where(valids_for_loc, localization_loss, zeros, name='loss_match')  # (batch_size, nboxes)
+        loss_loc_summed = tf.reduce_sum(localization_loss_matches, name='loss_summed')  # ()
+        loss_loc_scaled = tf.divide(loss_loc_summed, n_valids_safe, name='loss_scaled')  # ()
+        loss_loc = tf.multiply(loss_loc_scaled, loc_loss_factor, name='loss_loc')  # ()
+
+        # Metric:
+        pred_coords_dec = CommonEncoding.decode_boxes_wrt_anchor_tf(pred_coords, opts)  # (batch_size, nboxes, 4)
+        gt_coords_dec = CommonEncoding.decode_boxes_wrt_anchor_tf(gt_coords, opts)  # (batch_size, nboxes, 4)
+        iou = compute_iou_tf(pred_coords_dec, gt_coords_dec)  # (batch_size, nboxes)
+        iou_matches = tf.where(valids_for_loc, iou, zeros)  # (batch_size, nboxes)
+        iou_summed = tf.reduce_sum(iou_matches)  # ()
+        iou_mean = tf.divide(iou_summed, n_valids_safe, name='iou_mean')  # ()
+    return loss_loc, iou_mean
+
+
+def compute_iou_np(boxes1, boxes2):
     # boxes1: (..., 4) [xmin, ymin, width, height]
     # boxes2: (..., 4) [xmin, ymin, width, height]
     xmin = np.maximum(boxes1[..., 0], boxes2[..., 0])
@@ -415,6 +615,21 @@ def compute_iou_multi_dim(boxes1, boxes2):
     union_area = boxes1_area + boxes2_area - intersection_area
     iou = intersection_area / union_area
     return iou  # (...)
+
+
+def compute_iou_tf(boxes1, boxes2):
+    # boxes1: (..., 4) [xmin, ymin, width, height]
+    # boxes2: (..., 4) [xmin, ymin, width, height]
+    xmin = tf.maximum(boxes1[..., 0], boxes2[..., 0])  # (batch_size)
+    ymin = tf.maximum(boxes1[..., 1], boxes2[..., 1])  # (batch_size)
+    xmax = tf.minimum(boxes1[..., 0] + boxes1[..., 2], boxes2[..., 0] + boxes2[..., 2])  # (batch_size)
+    ymax = tf.minimum(boxes1[..., 1] + boxes1[..., 3], boxes2[..., 1] + boxes2[..., 3])  # (batch_size)
+    intersection_area = tf.maximum((xmax - xmin), 0.0) * tf.maximum((ymax - ymin), 0.0)  # (batch_size)
+    boxes1_area = boxes1[..., 2] * boxes1[..., 3]  # (batch_size)
+    boxes2_area = boxes2[..., 2] * boxes2[..., 3]  # (batch_size)
+    union_area = boxes1_area + boxes2_area - intersection_area  # (batch_size)
+    iou = intersection_area / union_area  # (batch_size)
+    return iou
 
 
 

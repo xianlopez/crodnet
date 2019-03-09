@@ -13,7 +13,7 @@ class MultiCellDataReader(CommonDataReader):
 
         super(MultiCellDataReader, self).__init__(opts, opts.multi_cell_opts.n_images_per_batch)
 
-        self.multi_cell_arch = multi_cell_arch
+        self.arch = multi_cell_arch
         self.input_width = input_shape[0]
         self.input_height = input_shape[1]
         self.preprocessor = Preprocessor.Preprocessor(self.input_width, self.input_height)
@@ -33,6 +33,10 @@ class MultiCellDataReader(CommonDataReader):
     def build_inputs(self):
         inputs = tf.placeholder(shape=(self.n_images_per_batch, self.input_height, self.input_width, 3), dtype=tf.float32)
         return inputs
+
+    def build_labels_enc(self):
+        labels_enc = tf.placeholder(shape=(self.n_images_per_batch, self.arch.n_boxes, self.arch.n_labels), dtype=tf.float32)
+        return labels_enc
 
     def sample_batch_filenames(self):
         indices = np.random.choice(self.remaining_indices, size=self.n_images_per_batch, replace=False)
