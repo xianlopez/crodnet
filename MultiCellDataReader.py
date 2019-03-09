@@ -3,6 +3,7 @@ import numpy as np
 import Preprocessor
 from CommonDataReader import CommonDataReader
 import tensorflow as tf
+import DataAugmentation
 
 
 # ======================================================================================================================
@@ -21,6 +22,8 @@ class MultiCellDataReader(CommonDataReader):
         self.filenames = self.get_filenames(split)
         self.n_images = len(self.filenames)
         self.n_batches = int(self.n_images / self.n_images_per_batch)
+
+        self.data_aug = DataAugmentation.DataAugmentation(opts.data_aug_opts)
 
         self.reset()
 
@@ -45,7 +48,7 @@ class MultiCellDataReader(CommonDataReader):
             self.remaining_indices.remove(idx)
         return batch_filenames
 
-    def get_next_batch(self):
+    def get_next_batch(self, apply_data_aug=False):
         end_of_epoch = False
         self.batch_count += 1
         batch_filenames = self.sample_batch_filenames()  # (n_images_per_batch)
@@ -56,6 +59,8 @@ class MultiCellDataReader(CommonDataReader):
             image, bboxes = self.read_image_with_bboxes(name)
             # image: (?, ?, 3)
             # bboxes: (n_gt, 7)
+            if apply_data_aug:
+                pass
             image, bboxes = self.resize_pad_zeros(image, bboxes)
             # image: (input_width, input_height, 3)
             image = self.preprocessor.subtract_mean_np(image)
