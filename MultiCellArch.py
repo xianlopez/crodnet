@@ -565,7 +565,7 @@ def classification_loss_and_metric(pred_conf, mask_match, mask_neutral, gt_class
                                        updates=tf.ones_like(indices, dtype=tf.int32), shape=tf.shape(loss_negatives_flat))
         negatives_keep = tf.cast(tf.reshape(negatives_keep, [-1, n_boxes]), tf.bool)  # (batch_size, nboxes)
         loss_negatives = tf.where(negatives_keep, loss_orig, zeros, name='loss_negatives')
-        loss_neg_scaled = tf.divide(loss_negatives, tf.maximum(tf.cast(n_negatives, tf.float32), 1), name='loss_neg_scaled')  # (batch_size, nboxes)
+        loss_neg_scaled = tf.divide(loss_negatives, tf.maximum(tf.cast(n_negatives_keep, tf.float32), 1), name='loss_neg_scaled')  # (batch_size, nboxes)
 
         # Join positives and negatives loss:
         loss_conf = tf.reduce_sum(loss_pos_scaled + loss_neg_scaled, name='loss_conf')  # ()
