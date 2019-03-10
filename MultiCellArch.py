@@ -616,7 +616,6 @@ def classification_loss_and_metric(pred_conf, mask_match, mask_neutral, gt_class
         loss_orig = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=gt_class_int, logits=pred_conf, name='loss_orig')  # (batch_size, nboxes)
         loss_positives = tf.where(mask_match, loss_orig, zeros, name='loss_positives')  # (batch_size)
         n_positives = tf.reduce_sum(tf.cast(mask_match, tf.int32), name='n_positives')  # ()
-        loss_pos_scaled = tf.divide(loss_positives, tf.maximum(tf.cast(n_positives, tf.float32), 1), name='loss_pos_scaled')  # (batch_size, nboxes)
 
         # Hard negative mining:
         mask_negatives = tf.logical_and(tf.logical_not(mask_match), tf.logical_not(mask_neutral), name='mask_negatives')  # (batch_size, nboxes)
@@ -631,10 +630,10 @@ def classification_loss_and_metric(pred_conf, mask_match, mask_neutral, gt_class
                                        updates=tf.ones_like(indices, dtype=tf.int32), shape=tf.shape(loss_negatives_flat))
         negatives_keep = tf.cast(tf.reshape(negatives_keep, [-1, n_boxes]), tf.bool)  # (batch_size, nboxes)
         loss_negatives = tf.where(negatives_keep, loss_orig, zeros, name='loss_negatives')
-        loss_neg_scaled = tf.divide(loss_negatives, tf.maximum(tf.cast(n_negatives_keep, tf.float32), 1), name='loss_neg_scaled')  # (batch_size, nboxes)
 
         # Join positives and negatives loss:
-        loss_conf = tf.reduce_sum(loss_pos_scaled + loss_neg_scaled, name='loss_conf')  # ()
+        loss_conf = tf.reduce_sum(loss_positives + loss_negatives, name='loss_joint')  # ()
+        loss_scaled = tf.divide(loss_conf, tf.maximum(tf.cast(n_negatives_keep + n_positives, tf.float32), 1), name='loss_scaled')  # (batch_size, nboxes)
 
         # Metric:
         predicted_class = tf.argmax(pred_conf, axis=-1, output_type=tf.int32)  # (batch_size, nboxes)
@@ -643,7 +642,7 @@ def classification_loss_and_metric(pred_conf, mask_match, mask_neutral, gt_class
         n_hits = tf.reduce_sum(hits_no_neutral)  # ()
         accuracy_conf = tf.divide(n_hits, tf.maximum(tf.cast(n_negatives + n_positives, tf.float32), 1))  # ()
 
-    return loss_conf, accuracy_conf
+    return loss_scaled, accuracy_conf
 
 
 def localization_loss_and_metric(pred_coords, mask_match, mask_neutral, gt_coords, zeros, loc_loss_factor, opts):
