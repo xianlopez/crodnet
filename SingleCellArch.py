@@ -794,9 +794,8 @@ def classification_loss_and_metric(pred_conf, mask_match, mask_neutral, gt_class
         mask_negatives = tf.logical_and(tf.logical_not(mask_match), tf.logical_not(mask_neutral), name='mask_negatives')  # (batch_size)
         loss_negatives = tf.where(mask_negatives, loss_orig, zeros, name='loss_negatives')
         n_negatives = tf.reduce_sum(tf.cast(mask_negatives, tf.int32), name='n_negatives')  # ()
-        loss_pos_scaled = tf.divide(loss_positives, tf.maximum(tf.cast(n_positives, tf.float32), 1), name='loss_pos_scaled')  # (batch_size)
-        loss_neg_scaled = tf.divide(loss_negatives, tf.maximum(tf.cast(n_negatives, tf.float32), 1), name='loss_neg_scaled')  # (batch_size)
-        loss_conf = tf.reduce_sum(loss_pos_scaled + loss_neg_scaled, name='loss_conf')  # ()
+        loss_joint = tf.reduce_sum(loss_positives + loss_negatives, name='loss_joint')  # ()
+        loss_scaled = tf.divide(loss_joint, tf.maximum(tf.cast(n_negatives + n_positives, tf.float32), 1), name='loss_scaled')  # (batch_size)
 
         # Metric:
         predicted_class = tf.argmax(pred_conf, axis=1, output_type=tf.int32)  # (batch_size)
@@ -805,7 +804,7 @@ def classification_loss_and_metric(pred_conf, mask_match, mask_neutral, gt_class
         n_hits = tf.reduce_sum(hits_no_neutral)  # ()
         accuracy_conf = tf.divide(n_hits, tf.maximum(tf.cast(n_negatives + n_positives, tf.float32), 1))  # ()
 
-    return loss_conf, accuracy_conf
+    return loss_scaled, accuracy_conf
 
 
 def localization_loss_and_metric(pred_coords, mask_match, mask_neutral, gt_coords, zeros, loc_loss_factor, opts):
