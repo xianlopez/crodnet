@@ -23,7 +23,7 @@ class MultiCellDataReader(CommonDataReader):
         self.n_images = len(self.filenames)
         self.n_batches = int(self.n_images / self.n_images_per_batch)
 
-        self.data_aug = DataAugmentation.DataAugmentation(opts.data_aug_opts)
+        self.data_aug = DataAugmentation.DataAugmentation(opts.data_aug_opts, opts.outdir)
 
         self.reset()
 
@@ -60,7 +60,7 @@ class MultiCellDataReader(CommonDataReader):
             # image: (?, ?, 3)
             # bboxes: (n_gt, 7)
             if apply_data_aug:
-                pass
+                image, bboxes = self.data_aug.data_augmenter(image, bboxes, name)
             image, bboxes = self.resize_pad_zeros(image, bboxes)
             # image: (input_width, input_height, 3)
             image = self.preprocessor.subtract_mean_np(image)

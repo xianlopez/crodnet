@@ -1,4 +1,3 @@
-import tensorflow as tf
 import os
 import cv2
 import tools
@@ -25,76 +24,77 @@ class DataAugOpts:
     saturation_factor_upper = 1.5
     random_hue = False
     hue_prob = 0.5
-    hue_delta_lower = -10
-    hue_delta_upper = 10
+    hue_delta_lower = -30
+    hue_delta_upper = 30
     convert_to_grayscale_prob = 0
+    ssd_original_pipeline = False
+    max_expand_scale = 3
+    min_crop_scale = 0.1
     write_image_after_data_augmentation = False
 ##################################
 
 
 class DataAugmentation:
-    def __init__(self, opts):
-        self.data_aug_opts = opts.data_aug_opts
-        self.outdir = opts.outdir
-        self.write_image_after_data_augmentation = self.data_aug_opts.write_image_after_data_augmentation
-        if opts.num_workers > 1 and self.data_aug_opts.write_image_after_data_augmentation:
-            raise Exception('Option write_image_after_data_augmentation is not compatible with more than one worker to load data.')
-
+    def __init__(self, opts, outdir):
+        self.opts = opts
+        self.outdir = outdir
+        self.write_image_after_data_augmentation = self.opts.write_image_after_data_augmentation
 
     def data_augmenter(self, image, bboxes, filename):
-        # Photometric distortions:
-        if self.data_aug_opts.random_brightness:
-            image = random_adjust_brightness(image, self.data_aug_opts.brightness_delta_lower,
-                                             self.data_aug_opts.brightness_delta_upper,
-                                             self.data_aug_opts.brightness_prob)
-        if self.data_aug_opts.random_contrast:
-            image = random_adjust_contrast(image, self.data_aug_opts.contrast_factor_lower,
-                                           self.data_aug_opts.contrast_factor_upper,
-                                           self.data_aug_opts.contrast_prob)
-        if self.data_aug_opts.random_saturation:
-            image = random_adjust_saturation(image, self.data_aug_opts.saturation_factor_lower,
-                                             self.data_aug_opts.saturation_factor_upper,
-                                             self.data_aug_opts.saturation_prob)
-        if self.data_aug_opts.random_hue:
-            image = random_adjust_hue(image, self.data_aug_opts.hue_delta_lower,
-                                      self.data_aug_opts.hue_delta_upper,
-                                      self.data_aug_opts.hue_prob)
-        if self.data_aug_opts.convert_to_grayscale_prob > 0:
-            image = convert_to_grayscale(image, self.data_aug_opts.convert_to_grayscale_prob)
-        # Flips:
-        if self.data_aug_opts.horizontal_flip:
-            flag = tf.random_uniform(()) < 0.5
-            bboxes = tf.cond(flag, lambda: self.flip_boxes_horizontally(bboxes), lambda: tf.identity(bboxes))
-            image = tf.cond(flag, lambda: tf.image.flip_left_right(image), lambda: tf.identity(image))
-        if self.data_aug_opts.vertical_flip:
-            flag = tf.random_uniform(()) < 0.5
-            bboxes = tf.cond(flag, lambda: self.flip_boxes_vertically(bboxes), lambda: tf.identity(bboxes))
-            image = tf.cond(flag, lambda: tf.image.flip_up_down(image), lambda: tf.identity(image))
+        if self.opts.ssd_original_pipeline:
+            image, bboxes = self.ssd_original_pipeline(image, bboxes)
+        else:
+            image, bboxes = self.custom_data_aug(image, bboxes)
         # Write images (for verification):
         if self.write_image_after_data_augmentation:
-            image = tf.py_func(self.write_image, [image, bboxes, filename], tf.float32)
-            image.set_shape((None, None, 3))
-        return image, bboxes, filename
+            self.write_image(image, bboxes, filename)
+        assert np.max(image) <= 255, 'np.max(image) > 255'
+        assert np.min(image) >= 0, 'np.min(image) < 0'
+        return image, bboxes
+
+    def custom_data_aug(self, image, bboxes):
+        # Photometric distortions:
+        image = image.astype(np.float32)
+        if self.opts.random_brightness:
+            image = random_adjust_brightness(image, self.opts.brightness_delta_lower, self.opts.brightness_delta_upper, self.opts.brightness_prob)
+        if self.opts.random_contrast:
+            image = random_adjust_contrast(image, self.opts.contrast_factor_lower, self.opts.contrast_factor_upper, self.opts.contrast_prob)
+        if self.opts.random_saturation:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+            image = random_adjust_saturation(image, self.opts.saturation_factor_lower, self.opts.saturation_factor_upper, self.opts.saturation_prob)
+            image = cv2.cvtColor(image, cv2.COLOR_HSV2BGR)
+        if self.opts.random_hue:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+            image = random_adjust_hue(image, self.opts.hue_delta_lower, self.opts.hue_delta_upper, self.opts.hue_prob)
+            image = cv2.cvtColor(image, cv2.COLOR_HSV2BGR)
+        if self.opts.convert_to_grayscale_prob > 0:
+            image = convert_to_grayscale(image, self.opts.convert_to_grayscale_prob)
+        # Flips:
+        if self.opts.horizontal_flip:
+            image, bboxes = horizontal_flip(image, bboxes)
+        if self.opts.vertical_flip:
+            image, bboxes = vertical_flip(image, bboxes)
+        return image, bboxes
 
     def photometrics_sequence1(self, image):
         # image is in the range [0, 255], in RGB (or BGR).
-        image = image.astype(np.int32)
-        image = random_adjust_brightness(image, self.data_aug_opts.brightness_delta_lower, self.data_aug_opts.brightness_delta_upper, self.data_aug_opts.brightness_prob)
-        image = random_adjust_contrast(image, self.data_aug_opts.contrast_factor_lower, self.data_aug_opts.contrast_factor_upper, self.data_aug_opts.contrast_prob)
+        image = image.astype(np.float32)
+        image = random_adjust_brightness(image, self.opts.brightness_delta_lower, self.opts.brightness_delta_upper, self.opts.brightness_prob)
+        image = random_adjust_contrast(image, self.opts.contrast_factor_lower, self.opts.contrast_factor_upper, self.opts.contrast_prob)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        image = random_adjust_saturation(image, self.data_aug_opts.saturation_factor_lower, self.data_aug_opts.saturation_factor_upper, self.data_aug_opts.saturation_prob)
-        image = random_adjust_hue(image, self.data_aug_opts.hue_delta_lower, self.data_aug_opts.hue_delta_upper, self.data_aug_opts.hue_prob)
+        image = random_adjust_saturation(image, self.opts.saturation_factor_lower, self.opts.saturation_factor_upper, self.opts.saturation_prob)
+        image = random_adjust_hue(image, self.opts.hue_delta_lower, self.opts.hue_delta_upper, self.opts.hue_prob)
         image = cv2.cvtColor(image, cv2.COLOR_HSV2BGR)
         return image
 
     def photometrics_sequence2(self, image):
-        image = image.astype(np.int32)
-        image = random_adjust_brightness(image, self.data_aug_opts.brightness_delta_lower, self.data_aug_opts.brightness_delta_upper, self.data_aug_opts.brightness_prob)
+        image = image.astype(np.float32)
+        image = random_adjust_brightness(image, self.opts.brightness_delta_lower, self.opts.brightness_delta_upper, self.opts.brightness_prob)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        image = random_adjust_saturation(image, self.data_aug_opts.saturation_factor_lower, self.data_aug_opts.saturation_factor_upper, self.data_aug_opts.saturation_prob)
-        image = random_adjust_hue(image, self.data_aug_opts.hue_delta_lower, self.data_aug_opts.hue_delta_upper, self.data_aug_opts.hue_prob)
+        image = random_adjust_saturation(image, self.opts.saturation_factor_lower, self.opts.saturation_factor_upper, self.opts.saturation_prob)
+        image = random_adjust_hue(image, self.opts.hue_delta_lower, self.opts.hue_delta_upper, self.opts.hue_prob)
         image = cv2.cvtColor(image, cv2.COLOR_HSV2BGR)
-        image = random_adjust_contrast(image, self.data_aug_opts.contrast_factor_lower, self.data_aug_opts.contrast_factor_upper, self.data_aug_opts.contrast_prob)
+        image = random_adjust_contrast(image, self.opts.contrast_factor_lower, self.opts.contrast_factor_upper, self.opts.contrast_prob)
         return image
 
     def ssd_photometric_distortions(self, image):
@@ -105,50 +105,44 @@ class DataAugmentation:
         return image
 
     def ssd_original_pipeline(self, image, bboxes):
+        # bboxes (n_gt, 7) [class_id, x_min, y_min, width, height, pc, gt_idx]
         # Photometric distortions:
         image = self.ssd_photometric_distortions(image)
         # Expand and crop:
-        (image, bboxes) = tf.py_func(expand_and_crop_ssd, [image, bboxes], (tf.float32, tf.float32))
-        image.set_shape((None, None, 3))
-        bboxes.set_shape((None, 5))
+        image, bboxes = expand_and_crop_ssd(image, bboxes, self.opts.max_expand_scale, self.opts.min_crop_scale)
         # Random flip:
-        flag = tf.random_uniform(()) < 0.5
-        bboxes = tf.cond(flag, lambda: self.flip_boxes_horizontally(bboxes), lambda: tf.identity(bboxes))
-        image = tf.cond(flag, lambda: tf.image.flip_left_right(image), lambda: tf.identity(image))
+        image, bboxes = horizontal_flip(image, bboxes)
         return image, bboxes
 
-    def flip_boxes_vertically(self, bboxes):
-        # bboxes: (nboxes, 7)
-        new_y_min = 1.0 - bboxes[:, 2] - bboxes[:, 4]  # (nboxes)
-        before = bboxes[:, :2]  # (nboxes, 2)
-        after = bboxes[:, 3:]  # (nboxes, 2)
-        bboxes = tf.concat([before, tf.expand_dims(new_y_min, axis=1), after], axis=1)  # (nboxes, 7)
-        return bboxes
-
-    def flip_boxes_horizontally(self, bboxes):
-        # bboxes: (nboxes, 7)
-        new_x_min = 1.0 - bboxes[:, 1] - bboxes[:, 3]  # (nboxes)
-        before = tf.expand_dims(bboxes[:, 0], axis=1)  # (nboxes, 2)
-        after = bboxes[:, 2:]  # (nboxes, 2)
-        bboxes = tf.concat([before, tf.expand_dims(new_x_min, axis=1), after], axis=1)  # (nboxes)
-        return bboxes
-
     def write_image(self, image, bboxes, filename):
-        filename_str = filename.decode(sys.getdefaultencoding())
-        file_path_candidate = os.path.join(self.outdir, 'image_after_data_aug_' + filename_str + '.png')
+        file_path_candidate = os.path.join(self.outdir, 'image_after_data_aug_' + filename + '.png')
         file_path = tools.ensure_new_path(file_path_candidate)
-        print('path to save image: ' + file_path)
-        print(str(np.min(image)) + '   ' + str(np.mean(image)) + '   ' + str(np.max(image)))
         img = image.copy()
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         img = tools.add_bounding_boxes_to_image(img, bboxes)
         cv2.imwrite(file_path, img)
-        return image
+        return
+
+
+def horizontal_flip(image, bboxes):
+    # bboxes (n_gt, 7) [class_id, x_min, y_min, width, height, pc, gt_idx]
+    if np.random.rand() < 0.5:
+        image = cv2.flip(image, 1)
+        bboxes[:, 1] = 1.0 - bboxes[:, 1] - bboxes[:, 3]
+    return image, bboxes
+
+
+def vertical_flip(image, bboxes):
+    # bboxes (n_gt, 7) [class_id, x_min, y_min, width, height, pc, gt_idx]
+    if np.random.rand() < 0.5:
+        image = cv2.flip(image, 0)
+        bboxes[:, 2] = 1.0 - bboxes[:, 2] - bboxes[:, 4]
+    return image, bboxes
 
 
 def expand_and_crop_ssd(image, bboxes, max_expand_scale, min_crop_scale):
     # image: (image_height, image_width, 3)
-    # bboxes: (nboxes, 5), [class_id, x_min, y_min, width, height]
+    # bboxes: (nboxes, 7), [class_id, x_min, y_min, width, height, pc, gt_idx]
 
     img_height, img_width, _ = image.shape
 
@@ -225,46 +219,82 @@ def make_patch_shape(img_width, img_height, min_scale, max_scale, min_aspect_rat
 
 
 def sample_patch(image, bboxes, img_width, img_height, patch_x0_rel, patch_y0_rel, patch_width_rel, patch_height_rel):
+    # image: (img_side, img_side, 3)
+    # bboxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
     # Convert to absolute coordinates:
     patch_x0_abs = max(np.round(patch_x0_rel * img_width).astype(np.int32), 0)
     patch_y0_abs = max(np.round(patch_y0_rel * img_height).astype(np.int32), 0)
     patch_width_abs = min(np.round(patch_width_rel * img_width).astype(np.int32), img_width - patch_x0_abs)
     patch_height_abs = min(np.round(patch_height_rel * img_height).astype(np.int32), img_height - patch_y0_abs)
     # Image:
-    patch = image[patch_y0_abs:(patch_y0_abs+patch_height_abs), patch_x0_abs:(patch_x0_abs+patch_width_abs), :]
-    # Bounding boxes:
-    patch_x1_rel = patch_x0_rel + patch_width_rel
-    patch_y1_rel = patch_y0_rel + patch_height_rel
-    remaining_boxes_list = []
-    for i in range(bboxes.shape[0]):
-        x_center = bboxes[i, 1] + float(bboxes[i, 3]) / 2
-        y_center = bboxes[i, 2] + float(bboxes[i, 4]) / 2
-        # print([patch_x0_rel, x_center, patch_x1_rel, patch_y0_rel, y_center, patch_y1_rel])
-        if patch_x0_rel < x_center < patch_x1_rel and patch_y0_rel < y_center < patch_y1_rel:
-            # print('box valid')
-            new_box_x0 = (bboxes[i, 1] - patch_x0_rel) / patch_width_rel
-            new_box_y0 = (bboxes[i, 2] - patch_y0_rel) / patch_height_rel
-            new_box_x1 = (bboxes[i, 1] + bboxes[i, 3] - patch_x0_rel) / patch_width_rel
-            new_box_y1 = (bboxes[i, 2] + bboxes[i, 4] - patch_y0_rel) / patch_height_rel
-            new_box_x0 = max(new_box_x0, 0)
-            new_box_y0 = max(new_box_y0, 0)
-            new_box_x1 = min(new_box_x1, 1)
-            new_box_y1 = min(new_box_y1, 1)
-            new_box_width = new_box_x1 - new_box_x0
-            new_box_height = new_box_y1 - new_box_y0
-            remaining_boxes_list.append([bboxes[i, 0], new_box_x0, new_box_y0, new_box_width, new_box_height])
-        else:
-            pass
-            # print('box not valid')
-    nboxes_remaining = len(remaining_boxes_list)
-    remaining_boxes = np.zeros(shape=(nboxes_remaining, 5), dtype=np.float32)
-    for i in range(nboxes_remaining):
-        remaining_boxes[i, 0] = remaining_boxes_list[i][0]
-        remaining_boxes[i, 1] = remaining_boxes_list[i][1]
-        remaining_boxes[i, 2] = remaining_boxes_list[i][2]
-        remaining_boxes[i, 3] = remaining_boxes_list[i][3]
-        remaining_boxes[i, 4] = remaining_boxes_list[i][4]
+    patch = image[patch_y0_abs:(patch_y0_abs+patch_height_abs), patch_x0_abs:(patch_x0_abs+patch_width_abs), :]  # (patch_height_abs, patch_width_abs, 3)
+    # Percent contained:
+    pc = compute_pc(bboxes, [patch_x0_rel, patch_y0_rel, patch_width_rel, patch_height_rel])  # (n_gt)
+
+    # Remaining boxes:
+    remaining_boxes_mask = pc > 1e-4  # (n_gt)
+    n_remaining_boxes = np.sum(remaining_boxes_mask.astype(np.int8))
+    remaining_boxes_mask_ext = np.tile(np.expand_dims(remaining_boxes_mask, axis=1), [1, 7])  # (n_gt, 7)
+    remaining_boxes_on_orig_coords = np.extract(remaining_boxes_mask_ext, bboxes)  # (n_remaining_boxes * 6)
+    remaining_boxes_on_orig_coords = np.reshape(remaining_boxes_on_orig_coords, (n_remaining_boxes, 7))  # (n_remaining_boxes, 7)
+
+    remaining_boxes_class_id = remaining_boxes_on_orig_coords[:, 0]  # (n_remaining_boxes)
+    remaining_boxes_pc = np.extract(remaining_boxes_mask, pc)  # (n_remaining_boxes)
+    orig_boxes_gt_idx = bboxes[:, 6]  # (n_gt)
+    remaining_boxes_gt_idx = np.extract(remaining_boxes_mask, orig_boxes_gt_idx)  # (n_remaining_boxes)
+
+    remaining_boxes_x0 = (remaining_boxes_on_orig_coords[:, 1] - patch_x0_rel) / patch_width_rel
+    remaining_boxes_y0 = (remaining_boxes_on_orig_coords[:, 2] - patch_y0_rel) / patch_height_rel
+    remaining_boxes_x1 = (remaining_boxes_on_orig_coords[:, 1] + remaining_boxes_on_orig_coords[:, 3] - patch_x0_rel) / patch_width_rel
+    remaining_boxes_y1 = (remaining_boxes_on_orig_coords[:, 2] + remaining_boxes_on_orig_coords[:, 4] - patch_y0_rel) / patch_height_rel
+    remaining_boxes_x0 = np.maximum(remaining_boxes_x0, 0)  # (n_remaining_boxes)
+    remaining_boxes_y0 = np.maximum(remaining_boxes_y0, 0)  # (n_remaining_boxes)
+    remaining_boxes_x1 = np.minimum(remaining_boxes_x1, 1)
+    remaining_boxes_y1 = np.minimum(remaining_boxes_y1, 1)
+    remaining_boxes_width = remaining_boxes_x1 - remaining_boxes_x0  # (n_remaining_boxes)
+    remaining_boxes_height = remaining_boxes_y1 - remaining_boxes_y0  # (n_remaining_boxes)
+
+    remaining_boxes = np.stack([remaining_boxes_class_id, remaining_boxes_x0,
+                                remaining_boxes_y0, remaining_boxes_width,
+                                remaining_boxes_height, remaining_boxes_pc,
+                                remaining_boxes_gt_idx], axis=-1)  # (n_remaining_boxes, 7)
     return patch, remaining_boxes
+
+
+def compute_pc(gt_boxes, patch):
+    # patch: [xmin, ymin, width, height]
+    # gt_boxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
+
+    n_gt = gt_boxes.shape[0]
+    patch_exp = np.expand_dims(patch, axis=0)
+    patch_exp = np.tile(patch_exp, [n_gt, 1])  # (n_gt, 4)
+
+    patch_xmin = patch_exp[:, 0]  # (n_gt)
+    patch_ymin = patch_exp[:, 1]  # (n_gt)
+    patch_xmax = patch_exp[:, 0] + patch_exp[:, 2]  # (n_gt)
+    patch_ymax = patch_exp[:, 1] + patch_exp[:, 3]  # (n_gt)
+
+    gt_boxes_xmin = gt_boxes[:, 1]  # (n_gt)
+    gt_boxes_ymin = gt_boxes[:, 2]  # (n_gt)
+    gt_boxes_xmax = gt_boxes[:, 1] + gt_boxes[:, 3]  # (n_gt)
+    gt_boxes_ymax = gt_boxes[:, 2] + gt_boxes[:, 4]  # (n_gt)
+
+    intersec_xmin = np.maximum(patch_xmin, gt_boxes_xmin)  # (n_gt)
+    intersec_ymin = np.maximum(patch_ymin, gt_boxes_ymin)  # (n_gt)
+    intersec_xmax = np.minimum(patch_xmax, gt_boxes_xmax)  # (n_gt)
+    intersec_ymax = np.minimum(patch_ymax, gt_boxes_ymax)  # (n_gt)
+
+    zero_grid = np.zeros((n_gt))  # (n_gt)
+    w = np.maximum(intersec_xmax - intersec_xmin, zero_grid)  # (n_gt)
+    h = np.maximum(intersec_ymax - intersec_ymin, zero_grid)  # (n_gt)
+    area_intersec = w * h  # (n_gt)
+
+    area_gt = gt_boxes[:, 3] * gt_boxes[:, 4]  # (n_gt)
+    pc = area_intersec / area_gt  # (n_gt)
+
+    pc = pc * np.array(gt_boxes[:, 5], dtype=np.float32)
+
+    return pc
 
 
 def adjust_contrast(image, factor):
@@ -293,7 +323,7 @@ def random_adjust_brightness(image, delta_lower, delta_upper, prob):
 
 def adjust_saturation(image, factor):
     # image is in HSV.
-    image[:, :, 1] = np.clip(image[:, :, 1] * factor, 0, 255)
+    image[:, :, 1] = np.clip(image[:, :, 1] * factor, 0, 1)
     return image
 
 
@@ -307,7 +337,7 @@ def random_adjust_saturation(image, factor_lower, factor_upper, prob):
 
 def adjust_hue(image, delta):
     # image is in HSV.
-    image[:, :, 0] = np.clip(image[:, :, 0] + delta, 0, 179)
+    image[:, :, 0] = np.clip(image[:, :, 0] + delta, 0, 359)
     return image
 
 
@@ -321,7 +351,7 @@ def random_adjust_hue(image, delta_lower, delta_upper, prob):
 
 def convert_to_grayscale(image, prob):
     if np.random.rand() < prob:
-        image = np.sum(image, axis=-1) / 3.0
+        image = np.tile(np.sum(image, axis=-1, keepdims=True) / 3.0, [1, 1, 3])
     return image
 
 

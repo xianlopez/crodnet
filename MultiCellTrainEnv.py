@@ -71,7 +71,7 @@ class MultiCellTrainEnv:
     # ------------------------------------------------------------------------------------------------------------------
     def evaluate_on_dataset(self, split, sess):
         logging.info('Computing loss and metrics on ' + split + ' data')
-        reader = self.get_split_reader('split')
+        reader = self.get_split_reader(split)
         initime = time.time()
         step = 0
         all_gt_boxes = []
@@ -84,7 +84,7 @@ class MultiCellTrainEnv:
 
         end_of_epoch = False
         while not end_of_epoch:
-            batch_images, batch_bboxes, batch_filenames, end_of_epoch = self.reader_train.get_next_batch()
+            batch_images, batch_bboxes, batch_filenames, end_of_epoch = self.reader_train.get_next_batch(apply_data_aug=False)
             labels_enc = self.arch.encode_gt_batched(batch_bboxes)
             localizations, softmax, batch_loss, batch_metrics = sess.run([self.localizations, self.softmax, self.loss, self.metrics],
                                                                          feed_dict={self.inputs: batch_images, self.labels_enc: labels_enc})
@@ -155,7 +155,7 @@ class MultiCellTrainEnv:
                 end_of_epoch = False
                 iniepoch = time.time()
                 while not end_of_epoch:
-                    batch_images, batch_bboxes, batch_filenames, end_of_epoch = self.reader_train.get_next_batch()
+                    batch_images, batch_bboxes, batch_filenames, end_of_epoch = self.reader_train.get_next_batch(apply_data_aug=True)
                     labels_enc = self.arch.encode_gt_batched(batch_bboxes)
 
                     if self.nbatches_accum > 0:

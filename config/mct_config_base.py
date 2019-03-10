@@ -61,7 +61,6 @@ class TrainConfiguration:
     ##################################
     ########### OTHER OPTS ###########
     percent_of_data = 100  # For debbuging. Percentage of data to use. Put 100 if not debbuging
-    num_workers = 8  # Number of parallel processes to read the data.
     if os.name == 'nt':  # Windows
         root_of_datasets = r'D:\datasets'
         experiments_folder = r'.\experiments'
@@ -72,7 +71,6 @@ class TrainConfiguration:
         raise Exception('Unexpected OS')
     random_seed = None  # An integer number, or None in order not to set the random seed.
     tf_log_level = 'ERROR'
-    buffer_size = 1000 # For shuffling data.
     max_image_size = 600
     gpu_memory_fraction = -1.0
     shuffle_data = True
