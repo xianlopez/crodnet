@@ -45,7 +45,7 @@ def train(args):
 def evaluate(args, split):
     print('run mode: evaluate')
 
-    env = MultiCellTrain.MultiCellTrain(args)
+    env = MultiCellTrainEnv.MultiCellTrainEnv(args)
 
     result = env.evaluate(split)
 
