@@ -17,7 +17,7 @@ class SingleCellArch:
         self.background_id = self.nclasses - 1
         self.n_labels = 11
         self.batch_size = self.opts.n_images_per_batch * self.opts.n_crops_per_image
-        self.metric_names = ['accuracy_conf', 'iou_mean', 'accuracy_comp']
+        self.metric_names = ['accuracy_conf', 'iou_mean']
         if self.opts.predict_pc:
             self.metric_names.append('pc_mean_err')
         if self.opts.predict_dc:
@@ -32,8 +32,6 @@ class SingleCellArch:
             raise Exception('outdir must be specified if debugging is True.')
         if self.opts.debug_eval:
             self.create_folders_for_eval_debug()
-        self.proportion_valid_comparisons = 0
-        self.proportion_same_comparisons = 0
         self.batch_count_train_debug = 0
         self.batch_count_eval_debug = 0
         self.n_matches = 0
@@ -58,19 +56,13 @@ class SingleCellArch:
         net_output = network.prediction_path(common_representation, self.opts, n_channels_last)  # (batch_size, 1, 1, n_channels_last)
         common_representation = tf.squeeze(common_representation, axis=[1, 2])  # (batch_size, lcr)
         net_output = tf.squeeze(net_output, axis=[1, 2])  # (batch_size, n_channels_last)
-        # Make comparisons:
-        comparisons_pred, comps_validity_labels, comparisons_indices = self.make_comparisons(common_representation, labels_enc_reord)
-        # comparisons_pred, indices_all_comparisons: (total_comparisons, 2)
-        # comparisons_labels: (total_comparisons)
         # Make loss and metrics:
-        loss, metrics = self.make_loss_and_metrics(net_output, labels_enc_reord, comparisons_pred, comps_validity_labels)  # ()
+        loss, metrics = self.make_loss_and_metrics(net_output, labels_enc_reord)  # ()
         # Write debug info:
         if self.opts.debug_train:
-            metrics = tf.py_func(self.write_train_debug_info, [metrics, inputs_reord, labels_enc_reord, net_output,
-                                                         comparisons_pred, comps_validity_labels, comparisons_indices, filenames], (tf.float32))
+            metrics = tf.py_func(self.write_train_debug_info, [metrics, inputs_reord, labels_enc_reord, net_output, filenames], (tf.float32))
         if self.opts.debug_eval:
-            metrics = tf.py_func(self.write_eval_debug_info, [metrics, inputs_reord, labels_enc_reord, net_output,
-                                                         comparisons_pred, comps_validity_labels, comparisons_indices, filenames], (tf.float32))
+            metrics = tf.py_func(self.write_eval_debug_info, [metrics, inputs_reord, labels_enc_reord, net_output, filenames], (tf.float32))
 
         return net_output, loss, metrics
 
@@ -82,69 +74,10 @@ class SingleCellArch:
         print('Min area to detect: ' + str(min_area) + ' (' + str(min_side) + ' x ' + str(min_side) + ')')
         print('Min area to detect: ' + str(max_area) + ' (' + str(max_side) + ' x ' + str(max_side) + ')')
 
-    def make_comparisons(self, common_representation, labels_enc_reord):
-        # common_representation: (batch_size, lcr)
-        # labels_enc_reord: (batch_size, n_labels)
-        gt_class_id = gt_encoding.get_class_id(labels_enc_reord)  # (batch_size)
-        nearest_valid_gt_idx = gt_encoding.get_associated_gt_idx(labels_enc_reord)  # (batch_size)
-        mask_neutral = gt_encoding.get_mask_neutral(labels_enc_reord)  # (batch_size)
-        images_range = tf.range(self.opts.n_images_per_batch)  # (n_images_per_batch)
-
-        # Indices of intra comprarisons:
-        total_comparisons_intra = self.opts.n_images_per_batch * self.opts.n_comparisons_intra
-        image_indices_comp_intra = tf.tile(tf.expand_dims(images_range, axis=-1), [1, self.opts.n_comparisons_intra])  # (n_images_per_batch, n_comparisons_intra)
-        image_indices_comp_intra = tf.reshape(image_indices_comp_intra, [total_comparisons_intra])  # (total_comparisons_intra)
-        # image_indices_comp_intra: [0, 0, ..., 0, 1, 1, ..., 1, ..., n_images_per_batch, n_images_per_batch, ..., n_images_per_batch]
-        image_indices_comp_intra_exp = tf.tile(tf.expand_dims(image_indices_comp_intra, axis=-1), [1, 2])  # (total_comparisons_intra, 2)
-        # Generate random indices relative to their image:
-        crop_indices_intra_left = tf.random_uniform(shape=[total_comparisons_intra], maxval=self.opts.n_crops_per_image, dtype=tf.int32)
-        crop_indices_distance = tf.random_uniform(shape=[total_comparisons_intra], minval=1, maxval=self.opts.n_crops_per_image, dtype=tf.int32)
-        crop_indices_intra_right = tf.floormod(crop_indices_intra_left + crop_indices_distance, self.opts.n_crops_per_image)
-        crop_indices_intra = tf.stack([crop_indices_intra_left, crop_indices_intra_right], axis=-1)  # (total_comparisons_intra, 2)
-        # Convert this relative indices to absolute:
-        random_indices_intra = crop_indices_intra + self.opts.n_crops_per_image * image_indices_comp_intra_exp  # (total_comparisons_intra, 2)
-
-        # Indices of inter comparisons:
-        total_comparisons_inter = self.opts.n_images_per_batch * self.opts.n_comparisons_inter
-        crop_indices_inter = tf.random_uniform(shape=(total_comparisons_inter, 2), maxval=self.opts.n_crops_per_image, dtype=tf.int32)
-        image_indices_comp_inter_left = tf.random_uniform(shape=[total_comparisons_inter], maxval=self.opts.n_images_per_batch, dtype=tf.int32)
-        image_indices_distance = tf.random_uniform(shape=[total_comparisons_inter], minval=1, maxval=self.opts.n_images_per_batch, dtype=tf.int32)
-        image_indices_comp_inter_right = tf.floormod(image_indices_comp_inter_left + image_indices_distance, self.opts.n_images_per_batch)
-        image_indices_comp_inter = tf.stack([image_indices_comp_inter_left, image_indices_comp_inter_right], axis=-1)  # (total_comparisons_inter, 2)
-        random_indices_inter = crop_indices_inter + self.opts.n_crops_per_image * image_indices_comp_inter  # (total_comparisons_inter, 2)
-
-        # CRs of comparisons:
-        indices_all_comparisons = tf.concat([random_indices_intra, random_indices_inter], axis=0)  # (total_comparisons, 2)
-        crs_all_comparisons = tf.gather(common_representation, indices_all_comparisons, axis=0)  # (total_comparisons, 2, lcr)
-
-        # Comparisons:
-        comparisons_pred = network.comparison(crs_all_comparisons, self.opts.lcr)  # (total_comparisons, 2)
-
-        # Labels of comparisons:
-        gt_idx_intra_comp = tf.gather(nearest_valid_gt_idx, random_indices_intra, axis=0)  # (total_comparisons_intra, 2)
-        same_gt_idx = tf.less(tf.abs(gt_idx_intra_comp[:, 0] - gt_idx_intra_comp[:, 1]), 0.5)  # (total_comparisons_intra)
-        gt_class_intra_comp = tf.gather(gt_class_id, random_indices_intra, axis=0)  # (total_comparisons_intra, 2)
-        any_background = tf.less(tf.abs(gt_class_intra_comp - self.background_id), 0.5)  # (total_comparisons_intra, 2)
-        any_background = tf.reduce_any(any_background, axis=1)  # (total_comparisons_intra)
-        any_neutral = tf.gather(mask_neutral, random_indices_intra, axis=0)  # (total_comparisons_intra, 2)
-        any_neutral = tf.greater(any_neutral, 0.5)
-        any_neutral = tf.reduce_any(any_neutral, axis=1)  # (total_comparisons_intra)
-        valid_comps_intra = tf.logical_not(tf.logical_or(any_background, any_neutral))
-        labels_comp_intra = same_gt_idx  # (total_comparisons_intra)
-        labels_comp_inter = tf.zeros(shape=(total_comparisons_inter), dtype=tf.bool)
-        valid_comps_inter = tf.ones(shape=(total_comparisons_inter), dtype=tf.bool)
-        labels_all_comparisons = tf.concat([labels_comp_intra, labels_comp_inter], axis=0)  # (total_comparisons)
-        valididty_all_comparisons = tf.concat([valid_comps_intra, valid_comps_inter], axis=0)  # (total_comparisons)
-        validity_labels_comps = tf.stack([valididty_all_comparisons, labels_all_comparisons], axis=1)  # (total_comparisons, 2)
-
-        return comparisons_pred, validity_labels_comps, indices_all_comparisons
-
-    def make_loss_and_metrics(self, net_output, labels_enc_reord, comparisons_pred, comps_validity_labels):
+    def make_loss_and_metrics(self, net_output, labels_enc_reord):
         # common_representation: (batch_size, lcr)
         # net_output: (batch_size, ?)
         # labels_enc_reord: (batch_size, n_labels)
-        # comparisons_pred: (total_comparisons, 2)
-        # comps_validity_labels: (total_comparisons, 2)  [validity, label]
 
         # Split net output:
         locs_enc = output_encoding.get_loc_enc(net_output)  # (batch_size, 4)
@@ -179,12 +112,7 @@ class SingleCellArch:
         tf.summary.scalar('metrics/iou_mean', iou_mean)
         total_loss += loc_loss
 
-        comp_loss, accuracy_comp = comparison_loss_and_metric(comparisons_pred, comps_validity_labels, self.opts.comp_loss_factor)
-        tf.summary.scalar('losses/comp_loss', comp_loss)
-        tf.summary.scalar('metrics/accuracy_comp', accuracy_comp)
-        total_loss += comp_loss
-
-        metrics = tf.stack([accuracy_conf, iou_mean, accuracy_comp])  # (3)
+        metrics = tf.stack([accuracy_conf, iou_mean])  # (2)
 
         if self.opts.predict_pc:
             pc_loss, pc_metric = pc_loss_and_metric(pc_pred, pc_label, mask_match, mask_neutral, zeros, self.opts.pc_loss_factor)
@@ -404,13 +332,10 @@ class SingleCellArch:
         ymax = xmax
         cv2.rectangle(img, (xmin, ymin), (xmax, ymax), color, thickness)
 
-    def write_train_debug_info(self, metrics, inputs_reord, labels_enc_reord, net_output, comparisons_pred, comps_validity_labels, comparisons_indices, filenames):
+    def write_train_debug_info(self, metrics, inputs_reord, labels_enc_reord, net_output, filenames):
         # inputs_reord: (batch_size, input_image_size, input_image_size, 3)
         # labels_enc_reord: (batch_size, n_labels)
         # net_output: (batch_size, ?)
-        # comparisons_pred: (total_comparisons, 2)
-        # comps_validity_labels: (total_comparisons, 2)  [validity, label]
-        # comparisons_indices: (total_comparisons, 2)
         # filenames: (n_images_per_batch)
 
         # Split net output:
@@ -483,88 +408,6 @@ class SingleCellArch:
                 print('Error with image ' + name)
                 raise
 
-        # Comparisons:
-        total_comparisons = (self.opts.n_comparisons_inter + self.opts.n_comparisons_intra) * self.opts.n_images_per_batch
-        intra_dir = os.path.join(batch_dir, 'intra_comparisons')
-        inter_dir = os.path.join(batch_dir, 'inter_comparisons')
-        os.makedirs(intra_dir)
-        os.makedirs(inter_dir)
-        n_diff = 0
-        n_same = 0
-        valid_comps = comps_validity_labels[:, 0]  # (total_comparisons)
-        comps_labels = comps_validity_labels[:, 1]  # (total_comparisons)
-        for i in range(total_comparisons):
-            idx1 = comparisons_indices[i, 0]
-            idx2 = comparisons_indices[i, 1]
-            name1 = filenames_reord[idx1].decode(sys.getdefaultencoding())
-            name2 = filenames_reord[idx2].decode(sys.getdefaultencoding())
-            try:
-                crop1 = inputs_reord[idx1, ...]  # (input_image_size, input_image_size, 3)
-                crop2 = inputs_reord[idx2, ...]  # (input_image_size, input_image_size, 3)
-                crop1 = tools.add_mean_again(crop1)
-                crop2 = tools.add_mean_again(crop2)
-                # Box of crop 1:
-                label_enc_1 = labels_enc_reord[idx1, :]
-                gt_class_1 = int(gt_encoding.get_class_id(label_enc_1))
-                gt_coords_enc_1 = gt_encoding.get_coords_enc(label_enc_1)
-                gt_coords_dec_1 = CommonEncoding.decode_boxes_wrt_anchor_np(gt_coords_enc_1, self.opts)
-                if gt_class_1 != self.background_id:
-                    class_and_coords = np.concatenate([np.expand_dims(gt_class_1, axis=0), gt_coords_dec_1], axis=0)  # (5)
-                    class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
-                    crop1 = tools.add_bounding_boxes_to_image(crop1, class_and_coords, color=(255, 0, 0))
-                # Box of crop 2:
-                label_enc_2 = labels_enc_reord[idx2, :]
-                gt_class_2 = int(gt_encoding.get_class_id(label_enc_2))
-                gt_coords_enc_2 = gt_encoding.get_coords_enc(label_enc_2)
-                gt_coords_dec_2 = CommonEncoding.decode_boxes_wrt_anchor_np(gt_coords_enc_2, self.opts)
-                if gt_class_2 != self.background_id:
-                    class_and_coords = np.concatenate([np.expand_dims(gt_class_2, axis=0), gt_coords_dec_2], axis=0)  # (5)
-                    class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
-                    crop2 = tools.add_bounding_boxes_to_image(crop2, class_and_coords, color=(255, 0, 0))
-                # Label and prediction:
-                is_valid = valid_comps[i] > 0.5
-                if is_valid:
-                    gt_comp = 'INVALID'
-                else:
-                    if comps_labels[i] > 0.5:
-                        gt_comp = 'same'
-                        n_same += 1
-                    else:
-                        gt_comp = 'diff'
-                        n_diff += 1
-                if comparisons_pred[i, 1] > comparisons_pred[i, 0]:
-                    pred_comp = 'same'
-                else:
-                    pred_comp = 'diff'
-                mosaic_name = 'comp' + str(i) + '_' + name1 + ' - ' + name2 + '_GT-' + gt_comp + '_PRED-' + pred_comp + '.png'
-                if name1 == name2:  # Intra-comparison:
-                    mosaic_path = os.path.join(intra_dir, mosaic_name)
-                else:  # Inter-comparison
-                    mosaic_path = os.path.join(inter_dir, mosaic_name)
-                separator = np.zeros(shape=(network.receptive_field_size, 10, 3), dtype=np.float32)
-                mosaic = np.concatenate([crop1, separator, crop2], axis=1)  # (2*input_image_size+10, input_image_size, 3)
-                cv2.imwrite(mosaic_path, cv2.cvtColor(mosaic.astype(np.uint8), cv2.COLOR_RGB2BGR))
-
-            except:
-                print('Error with pair ' + name1 + ' - ' + name2)
-                raise
-
-        total_valid_comparisons = n_same + n_diff
-        if total_comparisons > 0:
-            proportion_valid_this_batch = float(total_valid_comparisons) / total_comparisons
-            if total_valid_comparisons > 0:
-                proportion_same_this_batch = float(n_same) / total_valid_comparisons
-            else:
-                proportion_same_this_batch = 0
-            self.proportion_valid_comparisons = (self.proportion_valid_comparisons * (self.batch_count_train_debug - 1) +
-                                                 proportion_valid_this_batch) / float(self.batch_count_train_debug)
-            self.proportion_same_comparisons = (self.proportion_same_comparisons * (self.batch_count_train_debug - 1) +
-                                                proportion_same_this_batch) / float(self.batch_count_train_debug)
-            print('Percent of valid comparisons. This batch: {:3.2f}. Acummulated: {:3.2f}'.format(proportion_valid_this_batch * 100.0,
-                                                                                                   self.proportion_valid_comparisons * 100.0))
-            print('Percent of same comparisons. This batch: {:3.2f}. Acummulated: {:3.2f}'.format(proportion_same_this_batch * 100.0,
-                                                                                                   self.proportion_same_comparisons * 100.0))
-
         return metrics
 
     def create_folders_for_eval_debug(self):
@@ -576,28 +419,11 @@ class SingleCellArch:
         os.makedirs(self.correct_class_dir)
         os.makedirs(self.wrong_class_dir)
         os.makedirs(self.neutral_dir)
-        self.comparisons_dir = os.path.join(self.outdir, 'comparisons')
-        self.comparison_same = os.path.join(self.comparisons_dir, 'gt_same')
-        self.comparison_diff = os.path.join(self.comparisons_dir, 'gt_diff')
-        self.comparison_same_correct = os.path.join(self.comparison_same, 'correct')
-        self.comparison_same_wrong = os.path.join(self.comparison_same, 'wrong')
-        self.comparison_diff_correct = os.path.join(self.comparison_diff, 'correct')
-        self.comparison_diff_wrong = os.path.join(self.comparison_diff, 'wrong')
-        os.makedirs(self.comparisons_dir)
-        os.makedirs(self.comparison_same)
-        os.makedirs(self.comparison_diff)
-        os.makedirs(self.comparison_same_correct)
-        os.makedirs(self.comparison_same_wrong)
-        os.makedirs(self.comparison_diff_correct)
-        os.makedirs(self.comparison_diff_wrong)
 
-    def write_eval_debug_info(self, metrics, inputs_reord, labels_enc_reord, net_output, comparisons_pred, comps_validity_labels, comparisons_indices, filenames):
+    def write_eval_debug_info(self, metrics, inputs_reord, labels_enc_reord, net_output, filenames):
         # inputs_reord: (batch_size, input_image_size, input_image_size, 3)
         # labels_enc_reord: (batch_size, n_labels)
         # net_output: (batch_size, ?)
-        # comparisons_pred: (total_comparisons, 2)
-        # comps_validity_labels: (total_comparisons, 2)  [validity, label]
-        # comparisons_indices: (total_comparisons, 2)
         # filenames: (n_images_per_batch)
 
         # Split net output:
@@ -688,95 +514,6 @@ class SingleCellArch:
         print('n_backgrounds: ' + str(self.n_backgrounds) + ' (' + str(np.round(float(self.n_backgrounds) / total_crops * 100.0, 2)) + '%)')
         print('n_neutrals: ' + str(self.n_neutrals) + ' (' + str(np.round(float(self.n_neutrals) / total_crops * 100.0, 2)) + '%)')
 
-        # Comparisons:
-        valid_comps = comps_validity_labels[:, 0]  # (total_comparisons)
-        comps_labels = comps_validity_labels[:, 1]  # (total_comparisons)
-        total_comparisons = (self.opts.n_comparisons_inter + self.opts.n_comparisons_intra) * self.opts.n_images_per_batch
-        n_diff = 0
-        n_same = 0
-        for i in range(total_comparisons):
-            idx1 = comparisons_indices[i, 0]
-            idx2 = comparisons_indices[i, 1]
-            name1 = filenames_reord[idx1].decode(sys.getdefaultencoding())
-            name2 = filenames_reord[idx2].decode(sys.getdefaultencoding())
-            is_intra = i < self.opts.n_comparisons_intra * self.opts.n_images_per_batch
-            try:
-                is_valid = valid_comps[i] > 0.5
-                if is_valid:
-                    crop1 = inputs_reord[idx1, ...]  # (input_image_size, input_image_size, 3)
-                    crop2 = inputs_reord[idx2, ...]  # (input_image_size, input_image_size, 3)
-                    crop1 = tools.add_mean_again(crop1)
-                    crop2 = tools.add_mean_again(crop2)
-                    # Box of crop 1:
-                    label_enc_1 = labels_enc_reord[idx1, :]
-                    gt_class_1 = int(gt_encoding.get_class_id(label_enc_1))
-                    gt_idx_1 = int(gt_encoding.get_associated_gt_idx(label_enc_1))
-                    if gt_class_1 != self.background_id:
-                        gt_coords_enc_1 = gt_encoding.get_coords_enc(label_enc_1)
-                        gt_coords_dec_1 = CommonEncoding.decode_boxes_wrt_anchor_np(gt_coords_enc_1, self.opts)
-                        class_and_coords = np.concatenate([np.expand_dims(gt_class_1, axis=0), gt_coords_dec_1], axis=0)  # (5)
-                        class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
-                        crop1 = tools.add_bounding_boxes_to_image(crop1, class_and_coords, color=(255, 0, 0))
-                    # Box of crop 2:
-                    label_enc_2 = labels_enc_reord[idx2, :]
-                    gt_class_2 = int(gt_encoding.get_class_id(label_enc_2))
-                    gt_idx_2 = int(gt_encoding.get_associated_gt_idx(label_enc_2))
-                    if gt_class_2 != self.background_id:
-                        gt_coords_enc_2 = gt_encoding.get_coords_enc(label_enc_2)
-                        gt_coords_dec_2 = CommonEncoding.decode_boxes_wrt_anchor_np(gt_coords_enc_2, self.opts)
-                        class_and_coords = np.concatenate([np.expand_dims(gt_class_2, axis=0), gt_coords_dec_2], axis=0)  # (5)
-                        class_and_coords = np.expand_dims(class_and_coords, axis=0)  # (1, 5)
-                        crop2 = tools.add_bounding_boxes_to_image(crop2, class_and_coords, color=(255, 0, 0))
-                    # Label and prediction:
-                    if comps_labels[i] > 0.5:
-                        gt_comp = 'same'
-                        n_same += 1
-                        assert gt_idx_1 == gt_idx_2, 'Boxes marked as same, but associated GT is different.'
-                    else:
-                        gt_comp = 'diff'
-                        n_diff += 1
-                        if is_intra and gt_idx_1 == gt_idx_2:
-                            raise Exception('Intra comparison, boxes marked as different, but same GT associated.')
-                    if comparisons_pred[i, 1] > comparisons_pred[i, 0]:
-                        pred_comp = 'same'
-                    else:
-                        pred_comp = 'diff'
-                    # Make the mosaic and save it:
-                    mosaic_name = 'batch' + str(self.batch_count_eval_debug) + '_comp' + str(i) + '_' + name1 + ' - ' + name2 + '.png'
-                    if gt_comp == pred_comp:
-                        if gt_comp == 'same':
-                            mosaic_path = os.path.join(self.comparison_same_correct, mosaic_name)
-                        else:
-                            mosaic_path = os.path.join(self.comparison_diff_correct, mosaic_name)
-                    else:
-                        if gt_comp == 'same':
-                            mosaic_path = os.path.join(self.comparison_same_wrong, mosaic_name)
-                        else:
-                            mosaic_path = os.path.join(self.comparison_diff_wrong, mosaic_name)
-                    separator = np.zeros(shape=(network.receptive_field_size, 10, 3), dtype=np.float32)
-                    mosaic = np.concatenate([crop1, separator, crop2], axis=1)  # (2*input_image_size+10, input_image_size, 3)
-                    cv2.imwrite(mosaic_path, cv2.cvtColor(mosaic.astype(np.uint8), cv2.COLOR_RGB2BGR))
-
-            except:
-                print('Error with pair ' + name1 + ' - ' + name2)
-                raise
-
-        total_valid_comparisons = n_same + n_diff
-        if total_comparisons > 0:
-            proportion_valid_this_batch = float(total_valid_comparisons) / total_comparisons
-            if total_valid_comparisons > 0:
-                proportion_same_this_batch = float(n_same) / total_valid_comparisons
-            else:
-                proportion_same_this_batch = 0
-            self.proportion_valid_comparisons = (self.proportion_valid_comparisons * (self.batch_count_eval_debug - 1) +
-                                                 proportion_valid_this_batch) / float(self.batch_count_eval_debug)
-            self.proportion_same_comparisons = (self.proportion_same_comparisons * (self.batch_count_eval_debug - 1) +
-                                                proportion_same_this_batch) / float(self.batch_count_eval_debug)
-            print('Percent of valid comparisons. This batch: {:3.2f}. Acummulated: {:3.2f}'.format(proportion_valid_this_batch * 100.0,
-                                                                                                   self.proportion_valid_comparisons * 100.0))
-            print('Percent of same comparisons. This batch: {:3.2f}. Acummulated: {:3.2f}'.format(proportion_same_this_batch * 100.0,
-                                                                                                   self.proportion_same_comparisons * 100.0))
-
         return metrics
 
 
@@ -831,31 +568,6 @@ def localization_loss_and_metric(pred_coords, mask_match, mask_neutral, gt_coord
         iou_summed = tf.reduce_sum(iou_matches)  # ()
         iou_mean = tf.divide(iou_summed, n_valids_safe, name='iou_mean')  # ()
     return loss_loc, iou_mean
-
-
-def comparison_loss_and_metric(comparisons_pred, comps_validity_labels, comp_loss_factor):
-    # comparisons_pred: (total_comparisons, 2)
-    # comps_validity_labels: (total_comparisons, 2)  [validity, label]
-    with tf.variable_scope('comp_loss'):
-        comparisons_labels_int = tf.cast(comps_validity_labels[:, 1], tf.int32)  # (total_comparisons)
-        comparisons_validity = comps_validity_labels[:, 0]  # (total_comparisons)
-        loss_orig = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=comparisons_labels_int,
-                                                                   logits=comparisons_pred, name='loss_orig')  # (total_comparisons)
-        zeros = tf.zeros_like(comparisons_validity, dtype=tf.float32)  # (total_comparisons)
-        loss_on_valids = tf.where(comparisons_validity, loss_orig, zeros, name='loss_match')  # (total_comparisons)
-        n_valids = tf.reduce_sum(tf.cast(comparisons_validity, tf.float32))  # ()
-        n_valids_safe = tf.maximum(n_valids, 1)  # ()
-        loss_comp = tf.reduce_sum(loss_on_valids)  # ()
-        loss_comp = tf.divide(loss_comp, n_valids_safe, name='loss_summed')
-        loss_comp = tf.multiply(loss_comp, comp_loss_factor, name='loss_comp')  # ()
-
-        # Metric:
-        predicted_class = tf.argmax(comparisons_pred, axis=1, output_type=tf.int32)  # (total_comparisons)
-        hits = tf.cast(tf.equal(comparisons_labels_int, predicted_class), tf.float32)  # (total_comparisons)
-        hits_valids = tf.where(comparisons_validity, hits, zeros)  # (total_comparisons)
-        n_hits = tf.reduce_sum(hits_valids)  # ()
-        accuracy_comp = tf.divide(n_hits, n_valids_safe)  # ()
-    return loss_comp, accuracy_comp
 
 
 def pc_loss_and_metric(pc_pred, pc_label, mask_match, mask_neutral, zeros, pc_loss_factor):

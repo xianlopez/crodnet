@@ -78,18 +78,5 @@ def prediction_path(net, opts, n_channles_last):
     return net
 
 
-def comparison(crs, lcr):
-    # crs: (n_comparisons, 2, lcr):
-    with tf.variable_scope('comparison'):
-        subtraction = crs[:, 0, :] - crs[:, 1, :]  # (n_comparisons, lcr)
-        n_comparisons = tf.shape(subtraction)[0]
-        subtraction_ext = tf.reshape(subtraction, (n_comparisons, 1, 1, lcr))
-        fc1 = slim.conv2d(subtraction_ext, lcr, [1, 1], scope='fc1')  # (n_comparisons, 1, 1, lcr)
-        comparison = slim.conv2d(fc1, 2, [1, 1], activation_fn=None, biases_initializer=None, scope='fc2')  # (n_comparisons, 1, 1, 2)
-        comparison = tf.squeeze(comparison, axis=[1, 2])  # (n_comparisons, 2)
-        comparison = tf.nn.softmax(comparison, axis=-1)  # (n_comparisons, 2)
-    return comparison
-
-
 
 
