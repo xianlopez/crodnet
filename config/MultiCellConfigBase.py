@@ -33,19 +33,14 @@ class MultiCellConfiguration:
     # confidence of background. If the first one is bigger, it is a detection.
     # If False, the maximum confidence of all classes must be greater than a threshold.
     detect_against_background = False
-    th_conf = 0.9
-    th_conf_eval = 0.2
-
-    th_cm_low = 0.1
-    th_cm_high = 0.2
-    cm_iou = 0.2
+    th_conf = 0.8
+    th_conf_eval = 0.1
 
     write_results = False
 
     threshold_nms = 0.5
     threshold_pcs = 0.6
     threshold_iou = 0.5
-    comp_th = 0.7
 
     hard_negatives_factor = 0.25
 

@@ -17,10 +17,11 @@ import operator
 class MultiCellEnv:
 
     # ------------------------------------------------------------------------------------------------------------------
-    def __init__(self, opts, split):
+    def __init__(self, opts, split, HNM=False):
 
         self.opts = opts
         self.split = split
+        self.HNM = HNM
 
         self.inputs = None
         self.restore_fn = None
@@ -35,18 +36,23 @@ class MultiCellEnv:
         self.generate_graph()
 
     # ------------------------------------------------------------------------------------------------------------------
-    def evaluate(self, HNM=True):
-        print('')
-        logging.info('Start evaluation')
-        if HNM:
+    def evaluate(self, save_path=None):
+        if self.HNM:
+            logging.info('Evaluating and looking for hard negatives.')
             detect_against_background = True
         else:
+            print('')
+            logging.info('Start evaluation')
             detect_against_background = self.opts.detect_against_background
         if self.opts.write_results:
             images_dir = os.path.join(self.opts.outdir, 'images')
             os.makedirs(images_dir)
         with tf.Session(config=tools.get_config_proto(self.opts.gpu_memory_fraction)) as sess:
-            self.restore_fn(sess)
+            if save_path is None:
+                self.saver.restore(sess, self.opts.weights_file)
+            else:
+                self.saver.restore(sess, save_path)
+
             logging.info('Computing metrics on ' + self.split + ' data')
             initime = time.time()
             nbatches = self.reader.n_batches
@@ -76,7 +82,7 @@ class MultiCellEnv:
                 all_pred_boxes.extend(batch_pred_boxes)
                 all_filenames.extend(batch_filenames)
 
-        if HNM:
+        if self.HNM:
             n_gt_boxes = count_gt_boxes(all_gt_boxes)
             max_hard_negatives = int(np.round(self.opts.hard_negatives_factor * float(n_gt_boxes)))
             hard_negatives = gather_hard_negatives(all_pred_boxes, max_hard_negatives)
@@ -122,6 +128,7 @@ class MultiCellEnv:
         self.define_inputs_and_labels()
         self.localizations, self.softmax, self.common_representations, pc, dc, cm = self.multi_cell_arch.make(self.inputs)
         self.restore_fn = tf.contrib.framework.assign_from_checkpoint_fn(self.opts.weights_file, tf.global_variables())
+        self.saver = tf.train.Saver(name='net_saver', max_to_keep=1000000)
 
     def define_inputs_and_labels(self):
         input_shape = self.multi_cell_arch.get_input_shape()

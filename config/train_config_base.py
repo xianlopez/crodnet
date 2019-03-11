@@ -3,6 +3,7 @@ import CrodnetOptions
 from LRScheduler import LRPolicies, LRSchedulerOpts
 from ImageCropper import ImageCropperOptions
 import os
+from mean_ap import MeanAPOpts
 
 
 ########### ALL CONFIG ###########
@@ -46,6 +47,19 @@ class TrainConfiguration:
 
     image_cropper_opts = ImageCropperOptions()
 
+    multi_cell_opts = CrodnetOptions.MultiCellOptions()
+
+    mean_ap_opts = MeanAPOpts()
+
+    hard_negatives_factor = 0.25
+    detect_against_background = False
+    th_conf = 0.8
+    th_conf_eval = 0.1
+    write_results = False
+    threshold_nms = 0.5
+    threshold_pcs = 0.6
+    threshold_iou = 0.5
+
     ##################################
     ######## DISPLAYING OPTS #########
     # If recompute_train is false, the metrics and loss shown for a training epoch, are computed with the results
@@ -56,6 +70,7 @@ class TrainConfiguration:
     nepochs_save = 100
     nepochs_checktrain = 1
     nepochs_checkval = 1
+    nepochs_hnm = 1
     ##################################
 
     ##################################

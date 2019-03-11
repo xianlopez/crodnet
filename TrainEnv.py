@@ -15,6 +15,7 @@ import math
 import SingleCellArch
 import re
 from LRScheduler import LRScheduler
+import MultiCellEnv
 
 
 class Checkpoint:
@@ -53,14 +54,20 @@ class TrainEnv:
         self.accum_ops = None
         self.train_step = None
 
+        self.graph_hnm = tf.Graph()
+        with self.graph_hnm.as_default():
+            self.env_hnm = MultiCellEnv.MultiCellEnv(self.opts, 'train', HNM=True)
+
         # Initialize network:
-        self.generate_graph()
+        self.graph_train = tf.Graph()
+        with self.graph_train.as_default():
+            self.generate_graph()
 
     # ------------------------------------------------------------------------------------------------------------------
     def evaluate(self, split):
         print('')
         logging.info('Start evaluation')
-        with tf.Session(config=tools.get_config_proto(self.opts.gpu_memory_fraction)) as sess:
+        with tf.Session(graph=self.graph_train, config=tools.get_config_proto(self.opts.gpu_memory_fraction)) as sess:
             self.initialize(sess)
             loss_mean, metrics_mean = self.evaluate_on_dataset(split, sess)
             logging.info('Loss: %.2e' % loss_mean)
@@ -100,7 +107,8 @@ class TrainEnv:
         logging.info("Start training")
         nbatches_train = self.reader.get_nbatches_per_epoch('train')
         lr_scheduler = LRScheduler(self.opts.lr_scheduler_opts, self.opts.outdir)
-        with tf.Session(config=tools.get_config_proto(self.opts.gpu_memory_fraction)) as sess:
+        sess = tf.Session(graph=self.graph_train, config=tools.get_config_proto(self.opts.gpu_memory_fraction))
+        try:
             # Initialization:
             self.initialize(sess)
             # Lists for the training history:
@@ -112,7 +120,8 @@ class TrainEnv:
             checkpoints = [] # This is a list of Checkpoint objects.
 
             # Tensorboard:
-            merged, summary_writer, tensorboard_url = self.prepare_tensorboard(sess)
+            with self.graph_train.as_default():
+                merged, summary_writer, tensorboard_url = self.prepare_tensorboard(sess)
 
             # Loop on epochs:
             current_lr = self.opts.learning_rate
@@ -195,13 +204,62 @@ class TrainEnv:
                 if epoch % self.opts.nepochs_save == 0:
                     self.save_checkpoint(sess, val_loss, epoch, checkpoints, self.opts.outdir)
 
+                # Hard-negative mining:
+                if epoch % self.opts.nepochs_hnm == 0:
+                    sess.close()
+                    logging.info('Looking for hard negatives...')
+                    # self.create_links_to_current_ckpt(checkpoints)
+                    with self.graph_hnm.as_default():
+                        self.env_hnm.evaluate(tf.train.latest_checkpoint(self.opts.outdir))
+                    logging.info('Starting training session again.')
+                    sess = tf.Session(graph=self.graph_train, config=tools.get_config_proto(self.opts.gpu_memory_fraction))
+                    self.saver.restore(sess, tf.train.latest_checkpoint(self.opts.outdir))
+
             # Save the model (if we haven't done it yet):
             if self.opts.num_epochs % self.opts.nepochs_save != 0:
                 self.save_checkpoint(sess, val_loss, epoch, checkpoints, self.opts.outdir)
 
+            sess.close()
+
+        except:
+            logging.error('Some error happened. Closing session.')
+            sess.close()
+            raise
+
         self.end_tensorboard()
 
         return
+
+    def create_links_to_current_ckpt(self, checkpoints):
+        assert len(checkpoints) > 0, 'Trying to create link to current checkpoint, but len(checkpoints) == 0.'
+        last_ckpt = checkpoints[len(checkpoints) - 1]
+        data_file = None
+        index_file = None
+        meta_file = None
+        data_suffix = None
+        for file in os.listdir(self.opts.outdir):
+            file_path = os.path.join(self.opts.outdir, file)
+            if last_ckpt in file_path:
+                if '.data-' in file_path:
+                    data_file = file_path
+                    pos = file_path.find('.data-')
+                    data_suffix = file_path[pos:]
+                elif '.index' in file_path:
+                    index_file = file_path
+                elif '.meta' in file_path:
+                    meta_file = file_path
+        assert data_file is not None, 'data_file is None'
+        assert index_file is not None, 'index_file is None'
+        assert meta_file is not None, 'meta_file is None'
+        print('data_file = ' + str(data_file))
+        print('index_file = ' + str(index_file))
+        print('meta_file = ' + str(meta_file))
+        data_lnk = os.path.join(self.opts.outdir, 'current_ckpt' + data_suffix)
+        index_lnk = os.path.join(self.opts.outdir, 'current_ckpt.index')
+        meta_lnk = os.path.join(self.opts.outdir, 'current_ckpt.meta')
+        os.symlink(data_file, data_lnk)
+        os.symlink(index_file, index_lnk)
+        os.symlink(meta_file, meta_lnk)
 
     def save_checkpoint(self, sess, validation_loss, epoch, checkpoints, outdir):
         if validation_loss is None:
@@ -312,6 +370,7 @@ class TrainEnv:
             # Get the variables to restore:
             vars_to_restore = tf.contrib.framework.get_variables_to_restore(include=varnames_to_restore)
             self.restore_fn = tf.contrib.framework.assign_from_checkpoint_fn(self.opts.weights_file, vars_to_restore)
+            self.ckpt_restore = tf.placeholder(shape=(), dtype=tf.string)
 
             # Variables to initialize from scratch (the rest):
             vars_new = tf.contrib.framework.get_variables_to_restore(exclude=varnames_to_restore)
