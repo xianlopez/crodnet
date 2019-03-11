@@ -35,9 +35,13 @@ class MultiCellEnv:
         self.generate_graph()
 
     # ------------------------------------------------------------------------------------------------------------------
-    def evaluate(self):
+    def evaluate(self, HNM=True):
         print('')
         logging.info('Start evaluation')
+        if HNM:
+            detect_against_background = True
+        else:
+            detect_against_background = self.opts.detect_against_background
         if self.opts.write_results:
             images_dir = os.path.join(self.opts.outdir, 'images')
             os.makedirs(images_dir)
@@ -48,6 +52,7 @@ class MultiCellEnv:
             nbatches = self.reader.n_batches
             all_gt_boxes = []
             all_pred_boxes = []
+            all_filenames = []
             step = 0
             end_of_epoch = False
             while not end_of_epoch:
@@ -56,9 +61,8 @@ class MultiCellEnv:
                     print('Step %i / %i' % (step, nbatches))
                 batch_images, batch_bboxes, batch_filenames, end_of_epoch = self.reader.get_next_batch()
                 localizations, softmax = sess.run([self.localizations, self.softmax], feed_dict={self.inputs: batch_images})
-                # softmax = self.remove_repeated_predictions(softmax, CRs, sess)
                 # Convert output arrays to BoundingBox objects:
-                batch_gt_boxes, batch_pred_boxes = self.postprocess_gt_and_preds(batch_bboxes, localizations, softmax, self.opts.detect_against_background)
+                batch_gt_boxes, batch_pred_boxes = self.postprocess_gt_and_preds(batch_bboxes, localizations, softmax, detect_against_background)
                 # Supress repeated predictions with non-maximum suppression:
                 batch_pred_boxes = non_maximum_suppression_batched(batch_pred_boxes, self.opts.threshold_nms)
                 # Supress repeated predictions with pc suppression:
@@ -67,17 +71,36 @@ class MultiCellEnv:
                 batch_pred_boxes = mark_true_false_positives(batch_pred_boxes, batch_gt_boxes, self.opts.threshold_iou)
                 if self.opts.write_results:
                     boxes_to_show = self.apply_detection_filter(batch_pred_boxes)
-                    write_results(batch_images, boxes_to_show, batch_gt_boxes, batch_filenames, self.classnames, images_dir, step)
+                    write_results_fn(batch_images, boxes_to_show, batch_gt_boxes, batch_filenames, self.classnames, images_dir, step)
                 all_gt_boxes.extend(batch_gt_boxes)
                 all_pred_boxes.extend(batch_pred_boxes)
-            precision, recall = compute_precision_recall_on_threshold(all_pred_boxes, all_gt_boxes, self.opts.th_conf)
-            logging.info('Confidence threshold: ' + str(self.opts.th_conf) + '. Precision: ' + str(precision) + '  -  recall: ' + str(recall))
-            mAP = mean_ap.compute_mAP(all_pred_boxes, all_gt_boxes, self.classnames, self.opts)
-            logging.info('Mean Average Precision: ' + str(mAP))
-            fintime = time.time()
-            logging.debug('Done in %.2f s' % (fintime - initime))
+                all_filenames.extend(batch_filenames)
+
+        if HNM:
+            n_gt_boxes = count_gt_boxes(all_gt_boxes)
+            max_hard_negatives = int(np.round(self.opts.hard_negatives_factor * float(n_gt_boxes)))
+            hard_negatives = gather_hard_negatives(all_pred_boxes, max_hard_negatives)
+            self.write_hard_negatives(hard_negatives, all_filenames)
+
+        precision, recall = compute_precision_recall_on_threshold(all_pred_boxes, all_gt_boxes, self.opts.th_conf)
+        logging.info('Confidence threshold: ' + str(self.opts.th_conf) + '. Precision: ' + str(precision) + '  -  recall: ' + str(recall))
+        mAP = mean_ap.compute_mAP(all_pred_boxes, all_gt_boxes, self.classnames, self.opts)
+        logging.info('Mean Average Precision: ' + str(mAP))
+        fintime = time.time()
+        logging.debug('Done in %.2f s' % (fintime - initime))
 
         return
+
+    def write_hard_negatives(self, hard_negatives, all_filenames):
+        hn_dir = os.path.join(self.opts.outdir, 'hard_negatives')
+        if not os.path.exists(hn_dir):
+            os.makedirs(hn_dir)
+        for hn in hard_negatives:
+            filename = all_filenames[hn.img_idx]
+            hn_ann_file = os.path.join(hn_dir, filename + '.txt')
+            with open(hn_ann_file, 'a') as fid:
+                fid.write(str(self.multi_cell_arch.background_id) +
+                          ' {:5.3f} {:5.3f} {:5.3f} {:5.3f}\n'.format(hn.xmin, hn.ymin, hn.width, hn.height))
 
     def apply_detection_filter(self, batch_pred_boxes):
         boxes_to_show = []
@@ -226,7 +249,7 @@ def compute_precision_recall_on_threshold(pred_boxes, gt_boxes, th_conf):
 
 
 
-def write_results(images, pred_boxes, gt_boxes, filenames, classnames, images_dir, batch_count):
+def write_results_fn(images, pred_boxes, gt_boxes, filenames, classnames, images_dir, batch_count):
     # images: List of length batch_size, with elements (input_width, input_height, 3)
     # pred_boxes: List of length batch_size, with lists of PredictedBox objects.
     # gt_boxes: List of length batch_size, with lists of BoundingBox objects.
@@ -318,3 +341,26 @@ def mark_true_false_positives(pred_boxes, gt_boxes, threshold_iou):
                 else:
                     break
     return pred_boxes
+
+
+def count_gt_boxes(all_gt_boxes):
+    n_gt = 0
+    for img_idx in range(len(all_gt_boxes)):
+        n_gt += len(all_gt_boxes[img_idx])
+    return n_gt
+
+
+def gather_hard_negatives(all_pred_boxes, max_num_to_keep):
+    FPs = []
+    for img_idx in range(len(all_pred_boxes)):
+        for box in all_pred_boxes[img_idx]:
+            if box.tp == 'no':
+                box.set_img_idx(img_idx)
+                FPs.append(box)
+    FPs.sort(key=operator.attrgetter('confidence'), reverse=True)
+    n_FPs = len(FPs)
+    if n_FPs > 1:
+        assert FPs[0].confidence >= FPs[1].confidence, 'FPs[0].confidence < FPs[1].confidence'
+    if n_FPs > max_num_to_keep:
+        FPs = FPs[:max_num_to_keep]
+    return FPs

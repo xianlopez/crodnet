@@ -47,6 +47,7 @@ class MultiCellConfiguration:
     threshold_iou = 0.5
     comp_th = 0.7
 
+    hard_negatives_factor = 0.25
 
     ##################################
     ##################################

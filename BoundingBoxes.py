@@ -59,12 +59,16 @@ class PredictedBox(BoundingBox):
         self.tp = 'unknown'
         self.anc_idx = anc_idx
         self.cm = cm
+        self.img_idx = None
 
     def set_tp(self, is_tp):
         if is_tp:
             self.tp = 'yes'
         else:
             self.tp = 'no'
+
+    def set_img_idx(self, img_idx):
+        self.img_idx = img_idx
 
 
 def boxes_are_equal(box1, box2, tolerance):
