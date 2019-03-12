@@ -1,6 +1,8 @@
 import cv2
 import numpy as np
 import network
+from threading import Lock
+import gt_encoding
 
 
 class ImageCropperOptions:
@@ -23,7 +25,68 @@ class ImageCropper:
         self.opts = image_cropper_opts
         self.single_cell_arch = single_cell_arch
         self.n_crops_per_image = n_crops_per_image
+        self.mutex = Lock()
+        self.reset_statistics()
         assert self.opts.probability_focus + self.opts.probability_pair + self.opts.probability_inside <= 1, 'Bad probabilities'
+
+    def compute_statistics(self):
+        self.mutex.acquire()
+        try:
+            total_crops = self.n_pos_crops + self.n_neutral_crops + self.n_neg_crops
+            pcnt_obj_focus = float(self.n_obj_focus) / total_crops * 100.0
+            pcnt_hn_focus = float(self.n_hn_focus) / total_crops * 100.0
+            pcnt_pos_crops = float(self.n_pos_crops) / total_crops * 100.0
+            pcnt_neutral_crops = float(self.n_neutral_crops) / total_crops * 100.0
+            pcnt_neg_crops = float(self.n_neg_crops) / total_crops * 100.0
+        finally:
+            self.mutex.release()
+        return pcnt_obj_focus, pcnt_hn_focus, pcnt_pos_crops, pcnt_neutral_crops, pcnt_neg_crops
+
+    def reset_statistics(self):
+        self.mutex.acquire()
+        try:
+            self.n_obj_focus = 0
+            self.n_hn_focus = 0
+            self.n_pos_crops = 0
+            self.n_neutral_crops = 0
+            self.n_neg_crops = 0
+        finally:
+            self.mutex.release()
+
+    def add_obj_focus(self):
+        self.mutex.acquire()
+        try:
+            self.n_obj_focus += 1
+        finally:
+            self.mutex.release()
+
+    def add_hn_focus(self):
+        self.mutex.acquire()
+        try:
+            self.n_hn_focus += 1
+        finally:
+            self.mutex.release()
+
+    def add_pos_crop(self):
+        self.mutex.acquire()
+        try:
+            self.n_pos_crops += 1
+        finally:
+            self.mutex.release()
+
+    def add_neutral_crop(self):
+        self.mutex.acquire()
+        try:
+            self.n_neutral_crops += 1
+        finally:
+            self.mutex.release()
+
+    def add_neg_crop(self):
+        self.mutex.acquire()
+        try:
+            self.n_neg_crops += 1
+        finally:
+            self.mutex.release()
 
     def take_crops_on_image(self, image, bboxes, hns):
         # image: (orig_height, orig_width, 3)
@@ -87,8 +150,10 @@ class ImageCropper:
                 box_idx = np.random.randint(0, n_gt + n_hns)
                 if box_idx < n_gt:
                     focus_obj = bboxes[box_idx]
+                    self.add_obj_focus()
                 else:
                     focus_obj = hns[box_idx - n_gt]
+                    self.add_hn_focus()
                 patch, remaining_boxes = sample_patch_focusing_on_object(image, bboxes, img_side, focus_obj,
                                                                          self.opts.max_dc, self.opts.min_ar, self.opts.max_ar)
             else:
@@ -123,6 +188,12 @@ class ImageCropper:
         # remaining_boxes: (n_remaining_boxes, 9) [class_id, xmin, ymin, width, height, percent_contained, gt_idx, c_x_unclipped, c_y_unclipped]
         # Encode the labels (and keep only one box):
         label_enc = self.single_cell_arch.encode_gt_from_array(remaining_boxes)  # (n_labels)
+        if gt_encoding.get_mask_match(label_enc) > 0.5:
+            self.add_pos_crop()
+        elif gt_encoding.get_mask_neutral(label_enc) > 0.5:
+            self.add_neutral_crop()
+        else:
+            self.add_neg_crop()
         # Resize the crop to the size expected by the network:
         crop = cv2.resize(patch, (network.receptive_field_size, network.receptive_field_size), interpolation=1)  # (receptive_field_size, receptive_field_size, 3)
         return crop, label_enc

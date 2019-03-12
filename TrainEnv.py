@@ -175,6 +175,14 @@ class TrainEnv:
                 finepoch = time.time()
                 logging.debug('Epoch computed in %.2f s' % (finepoch - iniepoch))
 
+                # Distribution of crops:
+                pcnt_obj_focus, pcnt_hn_focus, pcnt_pos_crops, pcnt_neutral_crops, pcnt_neg_crops = self.reader.compute_and_reset_statistics()
+                logging.info('Percent of crops focusing on a positive object: %.2f' % (pcnt_obj_focus))
+                logging.info('Percent of crops focusing on a hard negative: %.2f' % (pcnt_hn_focus))
+                logging.info('Percent of positive crops: %.2f' % (pcnt_pos_crops))
+                logging.info('Percent of neutral crops: %.2f' % (pcnt_neutral_crops))
+                logging.info('Percent of negative crops: %.2f' % (pcnt_neg_crops))
+
                 # Compute loss and metrics on training data:
                 if self.opts.recompute_train:
                     train_loss, train_metrics = self.evaluate_on_dataset('train', sess)

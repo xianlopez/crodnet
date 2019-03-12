@@ -69,6 +69,11 @@ class TrainDataReader(CommonDataReader):
         else:
             raise Exception('Split not recognized.')
 
+    def compute_and_reset_statistics(self):
+        pcnt_obj_focus, pcnt_hn_focus, pcnt_pos_crops, pcnt_neutral_crops, pcnt_neg_crops = self.image_cropper.compute_statistics()
+        self.image_cropper.reset_statistics()
+        return pcnt_obj_focus, pcnt_hn_focus, pcnt_pos_crops, pcnt_neutral_crops, pcnt_neg_crops
+
     # ------------------------------------------------------------------------------------------------------------------
     def build_iterator(self):
         batched_dataset_train, self.nimages_train = self.build_batched_dataset('train')
