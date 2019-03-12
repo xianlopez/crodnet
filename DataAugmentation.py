@@ -43,7 +43,7 @@ class DataAugmentation:
             raise Exception('Option write_image_after_data_augmentation is not compatible with more than one worker to load data.')
 
 
-    def data_augmenter(self, image, bboxes, filename):
+    def data_augmenter(self, image, bboxes, hns, filename):
         # Photometric distortions:
         if self.data_aug_opts.random_brightness:
             image = random_adjust_brightness(image, self.data_aug_opts.brightness_delta_lower,
@@ -67,16 +67,18 @@ class DataAugmentation:
         if self.data_aug_opts.horizontal_flip:
             flag = tf.random_uniform(()) < 0.5
             bboxes = tf.cond(flag, lambda: self.flip_boxes_horizontally(bboxes), lambda: tf.identity(bboxes))
+            hns = tf.cond(flag, lambda: self.flip_boxes_horizontally(hns), lambda: tf.identity(hns))
             image = tf.cond(flag, lambda: tf.image.flip_left_right(image), lambda: tf.identity(image))
         if self.data_aug_opts.vertical_flip:
             flag = tf.random_uniform(()) < 0.5
             bboxes = tf.cond(flag, lambda: self.flip_boxes_vertically(bboxes), lambda: tf.identity(bboxes))
+            hns = tf.cond(flag, lambda: self.flip_boxes_vertically(hns), lambda: tf.identity(hns))
             image = tf.cond(flag, lambda: tf.image.flip_up_down(image), lambda: tf.identity(image))
         # Write images (for verification):
         if self.write_image_after_data_augmentation:
-            image = tf.py_func(self.write_image, [image, bboxes, filename], tf.float32)
+            image = tf.py_func(self.write_image, [image, bboxes, hns, filename], tf.float32)
             image.set_shape((None, None, 3))
-        return image, bboxes, filename
+        return image, bboxes, hns, filename
 
     def flip_boxes_vertically(self, bboxes):
         # bboxes: (nboxes, 7)
@@ -94,7 +96,7 @@ class DataAugmentation:
         bboxes = tf.concat([before, tf.expand_dims(new_x_min, axis=1), after], axis=1)  # (nboxes)
         return bboxes
 
-    def write_image(self, image, bboxes, filename):
+    def write_image(self, image, bboxes, hns, filename):
         filename_str = filename.decode(sys.getdefaultencoding())
         file_path_candidate = os.path.join(self.outdir, 'image_after_data_aug_' + filename_str + '.png')
         file_path = tools.ensure_new_path(file_path_candidate)
@@ -103,6 +105,7 @@ class DataAugmentation:
         img = image.copy()
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         img = tools.add_bounding_boxes_to_image(img, bboxes)
+        img = tools.add_bounding_boxes_to_image(img, hns, color=(255,0,255))
         cv2.imwrite(file_path, img)
         return image
 

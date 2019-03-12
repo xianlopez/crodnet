@@ -25,23 +25,24 @@ class ImageCropper:
         self.n_crops_per_image = n_crops_per_image
         assert self.opts.probability_focus + self.opts.probability_pair + self.opts.probability_inside <= 1, 'Bad probabilities'
 
-    def take_crops_on_image(self, image, bboxes):
+    def take_crops_on_image(self, image, bboxes, hns):
         # image: (orig_height, orig_width, 3)
         # bboxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
+        # hns: (n_hns, 7) [class_id, xmin, ymin, width, height, 1, -1]
         # Pad the image to make it square:
-        image, bboxes = pad_to_make_square(image, bboxes)
+        image, bboxes, hns = pad_to_make_square(image, bboxes, hns)
         # Add a black frame around the image, to allow crops to lie partially outside the image:
-        padded_image, bboxes, padded_side = self.pad_image(image, bboxes)
+        padded_image, bboxes, hns, padded_side = self.pad_image(image, bboxes, hns)
         # Make crops:
         crops = np.zeros(shape=(self.n_crops_per_image, network.receptive_field_size, network.receptive_field_size, 3), dtype=np.float32)
         labels_enc = np.zeros(shape=(self.n_crops_per_image, self.single_cell_arch.n_labels), dtype=np.float32)
         for i in range(self.n_crops_per_image):
-            this_crop, this_label_enc = self.crop_following_policy(padded_image, bboxes, padded_side)
+            this_crop, this_label_enc = self.crop_following_policy(padded_image, bboxes, hns, padded_side)
             crops[i, :, :, :] = this_crop
             labels_enc[i, :] = this_label_enc
         return crops, labels_enc
 
-    def pad_image(self, image, bboxes):
+    def pad_image(self, image, bboxes, hns):
         # image: (sq_side, sq_side, 3)
         sq_side, width, _ = image.shape
         assert sq_side == width, 'Image is not square in pad_image.'
@@ -60,7 +61,12 @@ class ImageCropper:
         bboxes[:, 2] = (bboxes[:, 2] + rel_incr_top) / (1.0 + rel_incr_top + rel_incr_bottom)
         bboxes[:, 3] = bboxes[:, 3] / (1.0 + rel_incr_left + rel_incr_right)
         bboxes[:, 4] = bboxes[:, 4] / (1.0 + rel_incr_top + rel_incr_bottom)
-        return padded_image, bboxes, padded_side
+        # The same on hard negative boxes:
+        hns[:, 1] = (hns[:, 1] + rel_incr_left) / (1.0 + rel_incr_left + rel_incr_right)
+        hns[:, 2] = (hns[:, 2] + rel_incr_top) / (1.0 + rel_incr_top + rel_incr_bottom)
+        hns[:, 3] = hns[:, 3] / (1.0 + rel_incr_left + rel_incr_right)
+        hns[:, 4] = hns[:, 4] / (1.0 + rel_incr_top + rel_incr_bottom)
+        return padded_image, bboxes, hns, padded_side
 
     def crop_only_random(self, image, bboxes, img_side):
         # image: (img_side, img_side, 3)
@@ -69,15 +75,21 @@ class ImageCropper:
         crop, label_enc = self.keep_one_box_and_resize(patch, remaining_boxes)
         return crop, label_enc
 
-    def crop_following_policy(self, image, bboxes, img_side):
+    def crop_following_policy(self, image, bboxes, hns, img_side):
         # image: (img_side, img_side, 3)
         # bboxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
+        # hns: (n_hns, 7) [class_id, xmin, ymin, width, height, 1, -1]
         n_gt = bboxes.shape[0]
+        n_hns = hns.shape[0]
         rnd1 = np.random.rand()
         if rnd1 < self.opts.probability_focus:
-            if n_gt >= 1:
-                box_idx = np.random.randint(0, n_gt)
-                patch, remaining_boxes = sample_patch_focusing_on_object(image, bboxes, img_side, box_idx,
+            if n_gt + n_hns >= 1:
+                box_idx = np.random.randint(0, n_gt + n_hns)
+                if box_idx < n_gt:
+                    focus_obj = bboxes[box_idx]
+                else:
+                    focus_obj = hns[box_idx - n_gt]
+                patch, remaining_boxes = sample_patch_focusing_on_object(image, bboxes, img_side, focus_obj,
                                                                          self.opts.max_dc, self.opts.min_ar, self.opts.max_ar)
             else:
                 patch, remaining_boxes = sample_random_patch(image, bboxes, img_side, self.opts.min_side_scale,
@@ -116,9 +128,10 @@ class ImageCropper:
         return crop, label_enc
 
 
-def pad_to_make_square(image, bboxes):
+def pad_to_make_square(image, bboxes, hns):
     # image: (orig_height, orig_width, 3)
     # bboxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
+    # hns: (n_hns, 7) [class_id, xmin, ymin, width, height, 1, -1]
     orig_height, orig_width, _ = image.shape
     max_side = max(orig_height, orig_width)
     # Increment on each side:
@@ -138,7 +151,12 @@ def pad_to_make_square(image, bboxes):
     bboxes[:, 2] = (bboxes[:, 2] + rel_incr_top) / (1.0 + rel_incr_top + rel_incr_bottom)
     bboxes[:, 3] = bboxes[:, 3] / (1.0 + rel_incr_left + rel_incr_right)
     bboxes[:, 4] = bboxes[:, 4] / (1.0 + rel_incr_top + rel_incr_bottom)
-    return image, bboxes
+    # The same on hard negative boxes:
+    hns[:, 1] = (hns[:, 1] + rel_incr_left) / (1.0 + rel_incr_left + rel_incr_right)
+    hns[:, 2] = (hns[:, 2] + rel_incr_top) / (1.0 + rel_incr_top + rel_incr_bottom)
+    hns[:, 3] = hns[:, 3] / (1.0 + rel_incr_left + rel_incr_right)
+    hns[:, 4] = hns[:, 4] / (1.0 + rel_incr_top + rel_incr_bottom)
+    return image, bboxes, hns
 
 
 def sample_patch_inside_object(image, bboxes, img_side, obj_idx):
@@ -191,10 +209,10 @@ def make_patch_shape_focusing_on_pair(bbox1, bbox2, max_dc, min_ar):
     return patch_xmin, patch_ymin, patch_side
 
 
-def sample_patch_focusing_on_object(image, bboxes, img_side, obj_idx, max_dc, min_ar, max_ar):
+def sample_patch_focusing_on_object(image, bboxes, img_side, focus_obj, max_dc, min_ar, max_ar):
     # image: (img_side, img_side, 3)
     # bboxes: (n_gt, 7) [class_id, xmin, ymin, width, height, percent_contained, gt_idx]
-    patch_x0_rel, patch_y0_rel, patch_side_rel = make_patch_shape_focusing_on_object(bboxes[obj_idx, :], max_dc, min_ar, max_ar)
+    patch_x0_rel, patch_y0_rel, patch_side_rel = make_patch_shape_focusing_on_object(focus_obj, max_dc, min_ar, max_ar)
     patch, remaining_boxes = sample_patch(image, bboxes, img_side, patch_x0_rel, patch_y0_rel, patch_side_rel)
     # patch: (patch_side_abs, patch_side_abs, 3)
     # remaining_boxes: (n_remaining_boxes, 9) [class_id, xmin, ymin, width, height, percent_contained, gt_idx, c_x_unclipped, c_y_unclipped]
