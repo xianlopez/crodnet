@@ -117,11 +117,10 @@ class TrainEnv:
             # Initialization:
             self.initialize(sess)
             # Lists for the training history:
-            train_metrics = []
-            train_losses = []
-            val_metrics = []
-            val_losses = []
-            val_loss = None
+            train_metrics_history = []
+            train_losses_history = []
+            val_metrics_history = []
+            val_losses_history = []
             checkpoints = [] # This is a list of Checkpoint objects.
 
             # Tensorboard:
@@ -177,33 +176,37 @@ class TrainEnv:
                 logging.debug('Epoch computed in %.2f s' % (finepoch - iniepoch))
 
                 # Compute loss and metrics on training data:
-                if epoch % self.opts.nepochs_checktrain == 0:
-                    if self.opts.recompute_train:
-                        loss_mean, metrics_mean = self.evaluate_on_dataset('train', sess)
-                        logging.info('Train loss: %.2e' % loss_mean)
-                        for m_idx in range(self.single_cell_arch.n_metrics):
-                            logging.info('Train ' + self.single_cell_arch.metric_names[m_idx] + ': %.2f' % train_metrics[m_idx])
-                    else:
-                        logging.info('Mean train loss during epoch: %.2e' % loss_mean)
-                        for m_idx in range(self.single_cell_arch.n_metrics):
-                            logging.info('Mean train ' + self.single_cell_arch.metric_names[m_idx] + ' during epoch: %.2f' % metrics_mean[m_idx])
-                    train_losses.append(loss_mean)
-                    train_metrics.append(metrics_mean)
+                if self.opts.recompute_train:
+                    train_loss, train_metrics = self.evaluate_on_dataset('train', sess)
+                    logging.info('Train loss: %.2e' % train_loss)
+                    for m_idx in range(self.single_cell_arch.n_metrics):
+                        logging.info('Train ' + self.single_cell_arch.metric_names[m_idx] + ': %.2f' % train_metrics_history[m_idx])
+                else:
+                    train_loss = loss_mean
+                    train_metrics = metrics_mean
+                    logging.info('Mean train loss during epoch: %.2e' % train_loss)
+                    for m_idx in range(self.single_cell_arch.n_metrics):
+                        logging.info('Mean train ' + self.single_cell_arch.metric_names[m_idx] + ' during epoch: %.2f' % train_metrics[m_idx])
+                train_losses_history.append(train_loss)
+                train_metrics_history.append(train_metrics)
 
                 # Compute loss and metrics on validation data:
                 if epoch % self.opts.nepochs_checkval == 0:
-                    val_loss, metrics = self.evaluate_on_dataset('val', sess)
-                    val_losses.append(val_loss)
-                    val_metrics.append(metrics)
+                    val_loss, val_metrics = self.evaluate_on_dataset('val', sess)
+                    val_losses_history.append(val_loss)
+                    val_metrics_history.append(val_metrics)
                     logging.info('Val loss: %.2e' % val_loss)
                     for m_idx in range(self.single_cell_arch.n_metrics):
-                        logging.info('Val ' + self.single_cell_arch.metric_names[m_idx] + ': %.2f' % metrics[m_idx])
+                        logging.info('Val ' + self.single_cell_arch.metric_names[m_idx] + ': %.2f' % val_metrics[m_idx])
                 else:
                     val_loss = None
+                    val_metrics = None
 
                 # Plot training progress:
                 if epoch % self.opts.nepochs_checktrain == 0 or epoch % self.opts.nepochs_checkval == 0:
-                    tools.plot_training_history(train_metrics, train_losses, val_metrics, val_losses, self.single_cell_arch.metric_names, self.opts, epoch)
+                    tools.plot_training_history(train_metrics_history, train_losses_history,
+                                                val_metrics_history, val_losses_history,
+                                                self.single_cell_arch.metric_names, self.opts, epoch)
 
                 # Save the model:
                 if epoch % self.opts.nepochs_save == 0:
@@ -215,11 +218,13 @@ class TrainEnv:
                     self.clean_hard_negatives()
                     logging.info('Looking for hard negatives...')
                     with self.graph_hnm.as_default():
-                        self.env_hnm.evaluate_and_hnm(tf.train.latest_checkpoint(self.opts.outdir))
+                        train_mAP = self.env_hnm.evaluate_and_hnm(tf.train.latest_checkpoint(self.opts.outdir))
                     if epoch % self.opts.nepochs_mceval != 0:
                         logging.info('Starting training session again.')
                         sess = tf.Session(graph=self.graph_train, config=tools.get_config_proto(self.opts.gpu_memory_fraction))
                         self.saver.restore(sess, tf.train.latest_checkpoint(self.opts.outdir))
+                else:
+                    train_mAP = None
 
                 # Check mAP in validation data:
                 if epoch % self.opts.nepochs_mceval == 0:
@@ -227,10 +232,15 @@ class TrainEnv:
                         sess.close()
                     logging.info('Computing mAP on validation data...')
                     with self.graph_mceval.as_default():
-                        self.env_mceval.evaluate(tf.train.latest_checkpoint(self.opts.outdir))
+                        val_mAP = self.env_mceval.evaluate(tf.train.latest_checkpoint(self.opts.outdir))
                     logging.info('Starting training session again.')
                     sess = tf.Session(graph=self.graph_train, config=tools.get_config_proto(self.opts.gpu_memory_fraction))
                     self.saver.restore(sess, tf.train.latest_checkpoint(self.opts.outdir))
+                else:
+                    val_mAP = None
+
+                # Save epoch report:
+                self.write_train_report(epoch, train_loss, train_metrics, train_mAP, val_loss, val_metrics, val_mAP)
 
             # Save the model (if we haven't done it yet):
             if self.opts.num_epochs % self.opts.nepochs_save != 0:
@@ -246,6 +256,43 @@ class TrainEnv:
         self.end_tensorboard()
 
         return
+
+    def write_train_report(self, epoch, train_loss, train_metrics, train_mAP, val_loss, val_metrics, val_mAP):
+        report_file = os.path.join(self.opts.outdir, 'train_report.csv')
+        # The first time, create the file and write headers:
+        if not os.path.exists(report_file):
+            with open(report_file, 'w') as fid:
+                fid.write('Epoch,Train loss,')
+                for metric_name in self.single_cell_arch.metric_names:
+                    fid.write('Train ' + metric_name + ',')
+                fid.write('Train mAP,')
+                fid.write('Val loss,')
+                for metric_name in self.single_cell_arch.metric_names:
+                    fid.write('Val ' + metric_name + ',')
+                fid.write('Val mAP\n')
+        # Add this epoch data:
+        with open(report_file, 'a') as fid:
+            fid.write(str(epoch) + ',' + str(train_loss) + ',')
+            for i in range(len(self.single_cell_arch.metric_names)):
+                fid.write(str(train_metrics[i]) + ',')
+            if train_mAP is None:
+                fid.write('-,')
+            else:
+                fid.write(str(train_mAP) + ',')
+            if val_loss is None:
+                fid.write('-,')
+            else:
+                fid.write(str(val_loss) + ',')
+            if val_metrics is None:
+                for i in range(len(self.single_cell_arch.metric_names)):
+                    fid.write('-,')
+            else:
+                for i in range(len(self.single_cell_arch.metric_names)):
+                    fid.write(str(val_metrics[i]) + ',')
+            if val_mAP is None:
+                fid.write('-\n')
+            else:
+                fid.write(str(val_mAP) + '\n')
 
     def clean_hard_negatives(self):
         hn_dir = os.path.join(self.opts.outdir, 'hard_negatives')

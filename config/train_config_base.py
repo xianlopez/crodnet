@@ -69,7 +69,6 @@ class TrainConfiguration:
     recompute_train = False
     nsteps_display = 20
     nepochs_save = 100
-    nepochs_checktrain = 1
     nepochs_checkval = 1
     nepochs_hnm = 1
     nepochs_mceval = 1

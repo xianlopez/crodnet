@@ -86,7 +86,7 @@ class MultiCellEnv:
         fintime = time.time()
         logging.debug('Done in %.2f s' % (fintime - initime))
 
-        return
+        return mAP
 
     # ------------------------------------------------------------------------------------------------------------------
     def evaluate(self, save_path=None, compute_pr_on_th=False):
@@ -103,7 +103,7 @@ class MultiCellEnv:
         fintime = time.time()
         logging.debug('Done in %.2f s' % (fintime - initime))
 
-        return
+        return mAP
 
     def write_hard_negatives(self, hard_negatives, all_filenames):
         hn_dir = os.path.join(self.opts.outdir, 'hard_negatives')
