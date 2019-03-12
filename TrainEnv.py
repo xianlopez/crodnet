@@ -211,10 +211,9 @@ class TrainEnv:
                     val_metrics = None
 
                 # Plot training progress:
-                if epoch % self.opts.nepochs_checktrain == 0 or epoch % self.opts.nepochs_checkval == 0:
-                    tools.plot_training_history(train_metrics_history, train_losses_history,
-                                                val_metrics_history, val_losses_history,
-                                                self.single_cell_arch.metric_names, self.opts, epoch)
+                tools.plot_training_history(train_metrics_history, train_losses_history,
+                                            val_metrics_history, val_losses_history,
+                                            self.single_cell_arch.metric_names, self.opts, epoch)
 
                 # Save the model:
                 if epoch % self.opts.nepochs_save == 0:
