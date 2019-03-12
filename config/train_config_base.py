@@ -59,6 +59,7 @@ class TrainConfiguration:
     threshold_nms = 0.5
     threshold_pcs = 0.6
     threshold_iou = 0.5
+    debug_hnm = False
 
     ##################################
     ######## DISPLAYING OPTS #########
@@ -71,6 +72,7 @@ class TrainConfiguration:
     nepochs_checktrain = 1
     nepochs_checkval = 1
     nepochs_hnm = 1
+    nepochs_mceval = 1
     ##################################
 
     ##################################

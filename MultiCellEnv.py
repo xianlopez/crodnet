@@ -35,26 +35,12 @@ class MultiCellEnv:
         # Initialize network:
         self.generate_graph()
 
-    # ------------------------------------------------------------------------------------------------------------------
-    def evaluate(self, save_path=None):
-        if self.HNM:
-            logging.info('Evaluating and looking for hard negatives.')
-            detect_against_background = True
-        else:
-            print('')
-            logging.info('Start evaluation')
-            detect_against_background = self.opts.detect_against_background
-        if self.opts.write_results:
+    def evaluation_loop(self, save_path, detect_against_background, write_results):
+        if write_results:
             images_dir = os.path.join(self.opts.outdir, 'images')
             os.makedirs(images_dir)
         with tf.Session(config=tools.get_config_proto(self.opts.gpu_memory_fraction)) as sess:
-            if save_path is None:
-                self.saver.restore(sess, self.opts.weights_file)
-            else:
-                self.saver.restore(sess, save_path)
-
-            logging.info('Computing metrics on ' + self.split + ' data')
-            initime = time.time()
+            self.saver.restore(sess, save_path)
             nbatches = self.reader.n_batches
             all_gt_boxes = []
             all_pred_boxes = []
@@ -75,23 +61,45 @@ class MultiCellEnv:
                 batch_pred_boxes = pc_suppression_batched(batch_pred_boxes, self.opts.threshold_pcs)
                 # Mark True and False positives:
                 batch_pred_boxes = mark_true_false_positives(batch_pred_boxes, batch_gt_boxes, self.opts.threshold_iou)
-                if self.opts.write_results:
+                if write_results:
                     boxes_to_show = self.apply_detection_filter(batch_pred_boxes)
                     write_results_fn(batch_images, boxes_to_show, batch_gt_boxes, batch_filenames, self.classnames, images_dir, step)
                 all_gt_boxes.extend(batch_gt_boxes)
                 all_pred_boxes.extend(batch_pred_boxes)
                 all_filenames.extend(batch_filenames)
+        return all_gt_boxes, all_pred_boxes, all_filenames
 
-        if self.HNM:
-            n_gt_boxes = count_gt_boxes(all_gt_boxes)
-            max_hard_negatives = int(np.round(self.opts.hard_negatives_factor * float(n_gt_boxes)))
-            hard_negatives = gather_hard_negatives(all_pred_boxes, max_hard_negatives)
-            self.write_hard_negatives(hard_negatives, all_filenames)
+    # ------------------------------------------------------------------------------------------------------------------
+    def evaluate_and_hnm(self, save_path):
+        logging.info('Evaluating and looking for hard negatives.')
+        detect_against_background = True
+        initime = time.time()
+        all_gt_boxes, all_pred_boxes, all_filenames = self.evaluation_loop(save_path, detect_against_background, self.opts.write_results)
 
-        precision, recall = compute_precision_recall_on_threshold(all_pred_boxes, all_gt_boxes, self.opts.th_conf)
-        logging.info('Confidence threshold: ' + str(self.opts.th_conf) + '. Precision: ' + str(precision) + '  -  recall: ' + str(recall))
+        n_gt_boxes = count_gt_boxes(all_gt_boxes)
+        max_hard_negatives = int(np.round(self.opts.hard_negatives_factor * float(n_gt_boxes)))
+        hard_negatives = gather_hard_negatives(all_pred_boxes, max_hard_negatives)
+        self.write_hard_negatives(hard_negatives, all_filenames)
+
         mAP = mean_ap.compute_mAP(all_pred_boxes, all_gt_boxes, self.classnames, self.opts)
         logging.info('Mean Average Precision: ' + str(mAP))
+        fintime = time.time()
+        logging.debug('Done in %.2f s' % (fintime - initime))
+
+        return
+
+    # ------------------------------------------------------------------------------------------------------------------
+    def evaluate(self, save_path=None, compute_pr_on_th=False):
+        initime = time.time()
+        if save_path is None:
+            save_path = self.opts.weights_file
+        all_gt_boxes, all_pred_boxes, all_filenames = self.evaluation_loop(save_path, self.opts.detect_against_background, self.opts.write_results)
+
+        mAP = mean_ap.compute_mAP(all_pred_boxes, all_gt_boxes, self.classnames, self.opts)
+        logging.info('Mean Average Precision: ' + str(mAP))
+        if compute_pr_on_th:
+            precision, recall = compute_precision_recall_on_threshold(all_pred_boxes, all_gt_boxes, self.opts.th_conf)
+            logging.info('Confidence threshold: ' + str(self.opts.th_conf) + '. Precision: ' + str(precision) + '  -  recall: ' + str(recall))
         fintime = time.time()
         logging.debug('Done in %.2f s' % (fintime - initime))
 
@@ -107,6 +115,20 @@ class MultiCellEnv:
             with open(hn_ann_file, 'a') as fid:
                 fid.write(str(self.multi_cell_arch.background_id) +
                           ' {:5.3f} {:5.3f} {:5.3f} {:5.3f}\n'.format(hn.xmin, hn.ymin, hn.width, hn.height))
+        if self.opts.debug_hnm:
+            hn_imgs_dir = os.path.join(self.opts.outdir, 'hard_negatives_images')
+            if not os.path.exists(hn_imgs_dir):
+                os.makedirs(hn_imgs_dir)
+            img_indices = [hn.img_idx for hn in hard_negatives]
+            unique_img_indices = set(img_indices)
+            for img_idx in unique_img_indices:
+                filename = all_filenames[img_idx]
+                img_path = os.path.join(self.opts.root_of_datasets, self.opts.dataset_name, 'images', filename + '.jpg')
+                img = cv2.imread(img_path)
+                hns_this_img = [hn for hn in hard_negatives if hn.img_idx == img_idx]
+                draw_result(img, hns_this_img, [], self.classnames)
+                dst_path = os.path.join(hn_imgs_dir, filename + '.jpg')
+                cv2.imwrite(dst_path, img)
 
     def apply_detection_filter(self, batch_pred_boxes):
         boxes_to_show = []

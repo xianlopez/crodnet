@@ -37,6 +37,7 @@ def plot_pr_curve(recall, precision_rect, recall_interp, precision_interp, thres
     plt.title(classname + ' - AP: ' + str(AP))
     fig_path = os.path.join(outdir, 'PR_' + classname + '.png')
     plt.savefig(fig_path)
+    plt.close()
 
 
 def precision_recall_curve(predictions_matches, n_objects):

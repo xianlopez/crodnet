@@ -12,6 +12,7 @@ tensorboard/*
 train_config.py
 eval_config.py
 multi_cell_config.py
+mct_config.py
 
 chain_config_files.txt
 config/train_config_chain_*

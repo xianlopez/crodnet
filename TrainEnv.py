@@ -16,6 +16,7 @@ import SingleCellArch
 import re
 from LRScheduler import LRScheduler
 import MultiCellEnv
+import shutil
 
 
 class Checkpoint:
@@ -57,6 +58,10 @@ class TrainEnv:
         self.graph_hnm = tf.Graph()
         with self.graph_hnm.as_default():
             self.env_hnm = MultiCellEnv.MultiCellEnv(self.opts, 'train', HNM=True)
+
+        self.graph_mceval = tf.Graph()
+        with self.graph_mceval.as_default():
+            self.env_mceval = MultiCellEnv.MultiCellEnv(self.opts, 'val', HNM=False)
 
         # Initialize network:
         self.graph_train = tf.Graph()
@@ -207,10 +212,22 @@ class TrainEnv:
                 # Hard-negative mining:
                 if epoch % self.opts.nepochs_hnm == 0:
                     sess.close()
+                    self.clean_hard_negatives()
                     logging.info('Looking for hard negatives...')
-                    # self.create_links_to_current_ckpt(checkpoints)
                     with self.graph_hnm.as_default():
-                        self.env_hnm.evaluate(tf.train.latest_checkpoint(self.opts.outdir))
+                        self.env_hnm.evaluate_and_hnm(tf.train.latest_checkpoint(self.opts.outdir))
+                    if epoch % self.opts.nepochs_mceval != 0:
+                        logging.info('Starting training session again.')
+                        sess = tf.Session(graph=self.graph_train, config=tools.get_config_proto(self.opts.gpu_memory_fraction))
+                        self.saver.restore(sess, tf.train.latest_checkpoint(self.opts.outdir))
+
+                # Check mAP in validation data:
+                if epoch % self.opts.nepochs_mceval == 0:
+                    if epoch % self.opts.nepochs_hnm != 0:
+                        sess.close()
+                    logging.info('Computing mAP on validation data...')
+                    with self.graph_mceval.as_default():
+                        self.env_mceval.evaluate(tf.train.latest_checkpoint(self.opts.outdir))
                     logging.info('Starting training session again.')
                     sess = tf.Session(graph=self.graph_train, config=tools.get_config_proto(self.opts.gpu_memory_fraction))
                     self.saver.restore(sess, tf.train.latest_checkpoint(self.opts.outdir))
@@ -229,6 +246,14 @@ class TrainEnv:
         self.end_tensorboard()
 
         return
+
+    def clean_hard_negatives(self):
+        hn_dir = os.path.join(self.opts.outdir, 'hard_negatives')
+        if os.path.exists(hn_dir):
+            shutil.rmtree(hn_dir)
+        hn_imgs_dir = os.path.join(self.opts.outdir, 'hard_negatives_images')
+        if os.path.exists(hn_imgs_dir):
+            shutil.rmtree(hn_imgs_dir)
 
     def create_links_to_current_ckpt(self, checkpoints):
         assert len(checkpoints) > 0, 'Trying to create link to current checkpoint, but len(checkpoints) == 0.'
