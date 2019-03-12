@@ -63,7 +63,7 @@ def plot_training_history(train_metrics, train_loss, val_metrics, val_loss, metr
     if len(train_loss) >= 2 or len(val_loss) >= 2:
 
         # Epochs on which we computed train and validation measures:
-        x_train = np.arange(args.nepochs_checktrain, epoch_num + 1, args.nepochs_checktrain)
+        x_train = np.arange(1, epoch_num + 1, 1)
         x_val = np.arange(args.nepochs_checkval, epoch_num + 1, args.nepochs_checkval)
         # Initialize figure:
         # Axis 1 will be for metrics, and axis 2 for losses.
