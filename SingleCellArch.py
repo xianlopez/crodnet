@@ -101,7 +101,7 @@ class SingleCellArch:
         n_positives = tf.reduce_sum(tf.cast(mask_match, tf.int32), name='n_positives')  # ()
 
         conf_loss, accuracy_conf = classification_loss_and_metric(logits, mask_match, mask_neutral,
-                                                                  gt_class_ids, zeros, n_positives)
+                                                                  gt_class_ids, zeros, n_positives, self.opts.negative_ratio)
         tf.summary.scalar('losses/conf_loss', conf_loss)
         tf.summary.scalar('metrics/accuracy_conf', accuracy_conf)
         total_loss = conf_loss
@@ -517,7 +517,7 @@ class SingleCellArch:
         return metrics
 
 
-def classification_loss_and_metric(pred_conf, mask_match, mask_neutral, gt_class, zeros, n_positives):
+def classification_loss_and_metric(pred_conf, mask_match, mask_neutral, gt_class, zeros, n_positives, negative_ratio):
     # pred_conf: (batch_size, nclasses)
     # mask_match: (batch_size)
     # mask_negative: (batch_size)
@@ -528,11 +528,20 @@ def classification_loss_and_metric(pred_conf, mask_match, mask_neutral, gt_class
         gt_class_int = tf.cast(gt_class, tf.int32)
         loss_orig = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=gt_class_int, logits=pred_conf, name='loss_orig')  # (batch_size)
         loss_positives = tf.where(mask_match, loss_orig, zeros, name='loss_positives')  # (batch_size)
+
+        # Hard negative mining:
         mask_negatives = tf.logical_and(tf.logical_not(mask_match), tf.logical_not(mask_neutral), name='mask_negatives')  # (batch_size)
-        loss_negatives = tf.where(mask_negatives, loss_orig, zeros, name='loss_negatives')
+        loss_negatives = tf.where(mask_negatives, loss_orig, zeros, name='loss_negatives')  # (batch_size)
         n_negatives = tf.reduce_sum(tf.cast(mask_negatives, tf.int32), name='n_negatives')  # ()
+        n_negatives_keep = tf.cast(tf.minimum(tf.maximum(1, n_positives * negative_ratio), n_negatives), tf.int32)
+        _, indices = tf.nn.top_k(loss_negatives, k=n_negatives_keep, sorted=False)  # (?)
+        negatives_keep = tf.scatter_nd(indices=tf.expand_dims(indices, axis=1),
+                                       updates=tf.ones_like(indices, dtype=tf.int32), shape=tf.shape(loss_negatives))  # (batch_size)
+        negatives_keep = tf.cast(negatives_keep, tf.bool)  # (batch_size)
+        loss_negatives = tf.where(negatives_keep, loss_orig, zeros, name='loss_negatives')
+
         loss_joint = tf.reduce_sum(loss_positives + loss_negatives, name='loss_joint')  # ()
-        loss_scaled = tf.divide(loss_joint, tf.maximum(tf.cast(n_negatives + n_positives, tf.float32), 1), name='loss_scaled')  # (batch_size)
+        loss_scaled = tf.divide(loss_joint, tf.maximum(tf.cast(n_negatives_keep + n_positives, tf.float32), 1), name='loss_scaled')  # (batch_size)
 
         # Metric:
         predicted_class = tf.argmax(pred_conf, axis=1, output_type=tf.int32)  # (batch_size)

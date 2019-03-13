@@ -55,3 +55,5 @@ class SingleCellOptions(CommonOptions):
         self.debug_train = False
         self.debug_eval = False
 
+        self.negative_ratio = 3
+
