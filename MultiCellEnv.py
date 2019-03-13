@@ -62,7 +62,10 @@ class MultiCellEnv:
                 # Mark True and False positives:
                 batch_pred_boxes = mark_true_false_positives(batch_pred_boxes, batch_gt_boxes, self.opts.threshold_iou)
                 if write_results:
-                    boxes_to_show = self.apply_detection_filter(batch_pred_boxes)
+                    if self.opts.detect_against_background:
+                        boxes_to_show = batch_pred_boxes
+                    else:
+                        boxes_to_show = self.apply_detection_filter(batch_pred_boxes)
                     write_results_fn(batch_images, boxes_to_show, batch_gt_boxes, batch_filenames, self.classnames, images_dir, step)
                 all_gt_boxes.extend(batch_gt_boxes)
                 all_pred_boxes.extend(batch_pred_boxes)
@@ -254,7 +257,10 @@ def compute_precision_recall_on_threshold(pred_boxes, gt_boxes, th_conf):
     for img_idx in range(nimages):
         preds_image = pred_boxes[img_idx]
         gt_image = gt_boxes[img_idx]
-        preds_over_th = [box for box in preds_image if box.confidence >= th_conf]
+        if th_conf is None:
+            preds_over_th = preds_image
+        else:
+            preds_over_th = [box for box in preds_image if box.confidence >= th_conf]
         TP_image = 0
         for box in preds_over_th:
             if box.tp == 'yes':

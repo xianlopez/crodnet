@@ -15,7 +15,7 @@ def main(inline_args):
 
     try:
         env = MultiCellEnv.MultiCellEnv(opts, inline_args.split)
-        env.evaluate()
+        env.evaluate(compute_pr_on_th=True)
         fin_time = time.time()
         print('')
         logging.info('Process finished.')
