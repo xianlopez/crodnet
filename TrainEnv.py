@@ -110,6 +110,8 @@ class TrainEnv:
 
         print('')
         logging.info("Start training")
+        assert self.opts.nepochs_mceval % self.opts.nepochs_save == 0, 'nepochs_mceval must be a multiple of nepochs_save'
+        assert self.opts.nepochs_hnm % self.opts.nepochs_save == 0, 'nepochs_hnm must be a multiple of nepochs_save'
         nbatches_train = self.reader.get_nbatches_per_epoch('train')
         lr_scheduler = LRScheduler(self.opts.lr_scheduler_opts, self.opts.outdir)
         sess = tf.Session(graph=self.graph_train, config=tools.get_config_proto(self.opts.gpu_memory_fraction))
